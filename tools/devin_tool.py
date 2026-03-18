@@ -95,7 +95,9 @@ def _get_active_session_id() -> Optional[str]:
     global _active_session
     if _active_session is None:
         _load_session_state()
-    return _active_session["session_id"] if _active_session else None
+    if not _active_session:
+        return None
+    return _active_session.get("session_id")
 
 
 def _devin_id(session_id: str) -> str:
