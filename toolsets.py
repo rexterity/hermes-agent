@@ -64,6 +64,8 @@ _HERMES_CORE_TOOLS = [
     "honcho_context", "honcho_profile", "honcho_search", "honcho_conclude",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+    # Devin AI collaboration (gated on DEVIN_API_KEY + DEVIN_ORG_ID via check_fn)
+    "devin_create", "devin_send", "devin_read", "devin_status", "devin_list", "devin_switch",
 ]
 
 
@@ -205,6 +207,12 @@ TOOLSETS = {
     "homeassistant": {
         "description": "Home Assistant smart home control and monitoring",
         "tools": ["ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service"],
+        "includes": []
+    },
+
+    "devin": {
+        "description": "Devin AI collaboration -- create sessions, send/read messages, manage session lifecycle",
+        "tools": ["devin_create", "devin_send", "devin_read", "devin_status", "devin_list", "devin_switch"],
         "includes": []
     },
 
