@@ -26,7 +26,7 @@ Hermes Agent works with any OpenAI-compatible API. Supported providers include:
 - **MiniMax** — global and China endpoints
 - **Local models** — via [Ollama](https://ollama.com/), [vLLM](https://docs.vllm.ai/), [llama.cpp](https://github.com/ggerganov/llama.cpp), [SGLang](https://github.com/sgl-project/sglang), or any OpenAI-compatible server
 
-Set your provider with `hermes setup` or by editing `~/.hermes/.env`. See the [Environment Variables](./environment-variables.md) reference for all provider keys.
+Set your provider with `hermes model` or by editing `~/.hermes/.env`. See the [Environment Variables](./environment-variables.md) reference for all provider keys.
 
 ### Does it work on Windows?
 
@@ -49,6 +49,8 @@ hermes config set OPENAI_BASE_URL http://localhost:11434/v1  # Ollama
 hermes config set OPENAI_API_KEY ollama                       # Any non-empty value
 hermes config set HERMES_MODEL llama3.1
 ```
+
+You can also save the endpoint interactively with `hermes model`. Hermes persists that custom endpoint in `config.yaml`, and auxiliary tasks configured with provider `main` follow the same saved endpoint.
 
 This works with Ollama, vLLM, llama.cpp server, SGLang, LocalAI, and others. See the [Configuration guide](../user-guide/configuration.md) for details.
 
@@ -160,8 +162,8 @@ curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scri
 # Check which keys are set
 hermes config get OPENROUTER_API_KEY
 
-# Re-run interactive setup
-hermes setup
+# Re-configure your provider
+hermes model
 
 # Or set directly
 hermes config set OPENROUTER_API_KEY sk-or-v1-xxxxxxxxxxxx
@@ -279,7 +281,7 @@ hermes gateway logs
 **Cause:** Network issues, bot token expired, or platform webhook misconfiguration.
 
 **Solution:**
-- Verify your bot token is valid with `hermes setup`
+- Verify your bot token is valid with `hermes gateway setup`
 - Check gateway logs: `hermes gateway logs`
 - For webhook-based platforms (Slack, WhatsApp), ensure your server is publicly accessible
 
@@ -391,20 +393,27 @@ mcp_servers:
 
 #### Tools not showing up from MCP server
 
-**Cause:** Server started but tool discovery failed, or tools are filtered out.
+**Cause:** Server started but tool discovery failed, tools were filtered out by config, or the server does not support the MCP capability you expected.
 
 **Solution:**
 - Check gateway/agent logs for MCP connection errors
 - Ensure the server responds to the `tools/list` RPC method
-- Restart the agent — MCP tools are discovered at startup
+- Review any `tools.include`, `tools.exclude`, `tools.resources`, `tools.prompts`, or `enabled` settings under that server
+- Remember that resource/prompt utility tools are only registered when the session actually supports those capabilities
+- Use `/reload-mcp` after changing config
 
 ```bash
 # Verify MCP servers are configured
-hermes config show | grep -A 5 mcp_servers
+hermes config show | grep -A 12 mcp_servers
 
-# Restart hermes to re-discover tools
+# Restart Hermes or reload MCP after config changes
 hermes chat
 ```
+
+See also:
+- [MCP (Model Context Protocol)](/docs/user-guide/features/mcp)
+- [Use MCP with Hermes](/docs/guides/use-mcp-with-hermes)
+- [MCP Config Reference](/docs/reference/mcp-config-reference)
 
 #### MCP timeout errors
 

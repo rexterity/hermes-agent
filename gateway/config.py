@@ -16,7 +16,20 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 from enum import Enum
 
+from hermes_cli.config import get_hermes_home
+
 logger = logging.getLogger(__name__)
+
+
+def _coerce_bool(value: Any, default: bool = True) -> bool:
+    """Coerce bool-ish config values, preserving a caller-provided default."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "on")
+    return bool(value)
 
 
 class Platform(Enum):
@@ -27,7 +40,13 @@ class Platform(Enum):
     WHATSAPP = "whatsapp"
     SLACK = "slack"
     SIGNAL = "signal"
+    MATTERMOST = "mattermost"
+    MATRIX = "matrix"
     HOMEASSISTANT = "homeassistant"
+    EMAIL = "email"
+    SMS = "sms"
+    DINGTALK = "dingtalk"
+    API_SERVER = "api_server"
 
 
 @dataclass
@@ -82,10 +101,14 @@ class SessionResetPolicy:
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SessionResetPolicy":
+        # Handle both missing keys and explicit null values (YAML null → None)
+        mode = data.get("mode")
+        at_hour = data.get("at_hour")
+        idle_minutes = data.get("idle_minutes")
         return cls(
-            mode=data.get("mode", "both"),
-            at_hour=data.get("at_hour", 4),
-            idle_minutes=data.get("idle_minutes", 1440),
+            mode=mode if mode is not None else "both",
+            at_hour=at_hour if at_hour is not None else 4,
+            idle_minutes=idle_minutes if idle_minutes is not None else 1440,
         )
 
 
@@ -129,6 +152,37 @@ class PlatformConfig:
 
 
 @dataclass
+class StreamingConfig:
+    """Configuration for real-time token streaming to messaging platforms."""
+    enabled: bool = False
+    transport: str = "edit"       # "edit" (progressive editMessageText) or "off"
+    edit_interval: float = 0.3    # Seconds between message edits
+    buffer_threshold: int = 40    # Chars before forcing an edit
+    cursor: str = " ▉"           # Cursor shown during streaming
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "transport": self.transport,
+            "edit_interval": self.edit_interval,
+            "buffer_threshold": self.buffer_threshold,
+            "cursor": self.cursor,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "StreamingConfig":
+        if not data:
+            return cls()
+        return cls(
+            enabled=data.get("enabled", False),
+            transport=data.get("transport", "edit"),
+            edit_interval=float(data.get("edit_interval", 0.3)),
+            buffer_threshold=int(data.get("buffer_threshold", 40)),
+            cursor=data.get("cursor", " ▉"),
+        )
+
+
+@dataclass
 class GatewayConfig:
     """
     Main gateway configuration.
@@ -145,13 +199,25 @@ class GatewayConfig:
     
     # Reset trigger commands
     reset_triggers: List[str] = field(default_factory=lambda: ["/new", "/reset"])
+
+    # User-defined quick commands (slash commands that bypass the agent loop)
+    quick_commands: Dict[str, Any] = field(default_factory=dict)
     
     # Storage paths
-    sessions_dir: Path = field(default_factory=lambda: Path.home() / ".hermes" / "sessions")
+    sessions_dir: Path = field(default_factory=lambda: get_hermes_home() / "sessions")
     
     # Delivery settings
     always_log_local: bool = True  # Always save cron outputs to local files
-    
+
+    # STT settings
+    stt_enabled: bool = True  # Whether to auto-transcribe inbound voice messages
+
+    # Session isolation in shared chats
+    group_sessions_per_user: bool = True  # Isolate group/channel sessions per participant when user IDs are available
+
+    # Streaming configuration
+    streaming: StreamingConfig = field(default_factory=StreamingConfig)
+
     def get_connected_platforms(self) -> List[Platform]:
         """Return list of platforms that are enabled and configured."""
         connected = []
@@ -166,6 +232,15 @@ class GatewayConfig:
                 connected.append(platform)
             # Signal uses extra dict for config (http_url + account)
             elif platform == Platform.SIGNAL and config.extra.get("http_url"):
+                connected.append(platform)
+            # Email uses extra dict for config (address + imap_host + smtp_host)
+            elif platform == Platform.EMAIL and config.extra.get("address"):
+                connected.append(platform)
+            # SMS uses api_key (Twilio auth token) — SID checked via env
+            elif platform == Platform.SMS and os.getenv("TWILIO_ACCOUNT_SID"):
+                connected.append(platform)
+            # API Server uses enabled flag only (no token needed)
+            elif platform == Platform.API_SERVER:
                 connected.append(platform)
         return connected
     
@@ -209,8 +284,12 @@ class GatewayConfig:
                 p.value: v.to_dict() for p, v in self.reset_by_platform.items()
             },
             "reset_triggers": self.reset_triggers,
+            "quick_commands": self.quick_commands,
             "sessions_dir": str(self.sessions_dir),
             "always_log_local": self.always_log_local,
+            "stt_enabled": self.stt_enabled,
+            "group_sessions_per_user": self.group_sessions_per_user,
+            "streaming": self.streaming.to_dict(),
         }
     
     @classmethod
@@ -239,57 +318,127 @@ class GatewayConfig:
         if "default_reset_policy" in data:
             default_policy = SessionResetPolicy.from_dict(data["default_reset_policy"])
         
-        sessions_dir = Path.home() / ".hermes" / "sessions"
+        sessions_dir = get_hermes_home() / "sessions"
         if "sessions_dir" in data:
             sessions_dir = Path(data["sessions_dir"])
         
+        quick_commands = data.get("quick_commands", {})
+        if not isinstance(quick_commands, dict):
+            quick_commands = {}
+
+        stt_enabled = data.get("stt_enabled")
+        if stt_enabled is None:
+            stt_enabled = data.get("stt", {}).get("enabled") if isinstance(data.get("stt"), dict) else None
+
+        group_sessions_per_user = data.get("group_sessions_per_user")
+
         return cls(
             platforms=platforms,
             default_reset_policy=default_policy,
             reset_by_type=reset_by_type,
             reset_by_platform=reset_by_platform,
             reset_triggers=data.get("reset_triggers", ["/new", "/reset"]),
+            quick_commands=quick_commands,
             sessions_dir=sessions_dir,
             always_log_local=data.get("always_log_local", True),
+            stt_enabled=_coerce_bool(stt_enabled, True),
+            group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
+            streaming=StreamingConfig.from_dict(data.get("streaming", {})),
         )
 
 
 def load_gateway_config() -> GatewayConfig:
     """
     Load gateway configuration from multiple sources.
-    
+
     Priority (highest to lowest):
     1. Environment variables
-    2. ~/.hermes/gateway.json
-    3. cli-config.yaml gateway section
-    4. Defaults
+    2. ~/.hermes/config.yaml (primary user-facing config)
+    3. ~/.hermes/gateway.json (legacy — provides defaults under config.yaml)
+    4. Built-in defaults
     """
-    config = GatewayConfig()
-    
-    # Try loading from ~/.hermes/gateway.json
-    gateway_config_path = Path.home() / ".hermes" / "gateway.json"
-    if gateway_config_path.exists():
+    _home = get_hermes_home()
+    gw_data: dict = {}
+
+    # Legacy fallback: gateway.json provides the base layer.
+    # config.yaml keys always win when both specify the same setting.
+    gateway_json_path = _home / "gateway.json"
+    if gateway_json_path.exists():
         try:
-            with open(gateway_config_path, "r") as f:
-                data = json.load(f)
-                config = GatewayConfig.from_dict(data)
+            with open(gateway_json_path, "r", encoding="utf-8") as f:
+                gw_data = json.load(f) or {}
+            logger.info(
+                "Loaded legacy %s — consider moving settings to config.yaml",
+                gateway_json_path,
+            )
         except Exception as e:
-            print(f"[gateway] Warning: Failed to load {gateway_config_path}: {e}")
-    
-    # Bridge session_reset from config.yaml (the user-facing config file)
-    # into the gateway config. config.yaml takes precedence over gateway.json
-    # for session reset policy since that's where hermes setup writes it.
+            logger.warning("Failed to load %s: %s", gateway_json_path, e)
+
+    # Primary source: config.yaml
     try:
         import yaml
-        config_yaml_path = Path.home() / ".hermes" / "config.yaml"
+        config_yaml_path = _home / "config.yaml"
         if config_yaml_path.exists():
-            with open(config_yaml_path) as f:
+            with open(config_yaml_path, encoding="utf-8") as f:
                 yaml_cfg = yaml.safe_load(f) or {}
+
+            # Map config.yaml keys → GatewayConfig.from_dict() schema.
+            # Each key overwrites whatever gateway.json may have set.
             sr = yaml_cfg.get("session_reset")
             if sr and isinstance(sr, dict):
-                config.default_reset_policy = SessionResetPolicy.from_dict(sr)
+                gw_data["default_reset_policy"] = sr
+
+            qc = yaml_cfg.get("quick_commands")
+            if qc is not None:
+                if isinstance(qc, dict):
+                    gw_data["quick_commands"] = qc
+                else:
+                    logger.warning(
+                        "Ignoring invalid quick_commands in config.yaml "
+                        "(expected mapping, got %s)",
+                        type(qc).__name__,
+                    )
+
+            stt_cfg = yaml_cfg.get("stt")
+            if isinstance(stt_cfg, dict):
+                gw_data["stt"] = stt_cfg
+
+            if "group_sessions_per_user" in yaml_cfg:
+                gw_data["group_sessions_per_user"] = yaml_cfg["group_sessions_per_user"]
+
+            streaming_cfg = yaml_cfg.get("streaming")
+            if isinstance(streaming_cfg, dict):
+                gw_data["streaming"] = streaming_cfg
+
+            if "reset_triggers" in yaml_cfg:
+                gw_data["reset_triggers"] = yaml_cfg["reset_triggers"]
+
+            if "always_log_local" in yaml_cfg:
+                gw_data["always_log_local"] = yaml_cfg["always_log_local"]
+
+            # Discord settings → env vars (env vars take precedence)
+            discord_cfg = yaml_cfg.get("discord", {})
+            if isinstance(discord_cfg, dict):
+                if "require_mention" in discord_cfg and not os.getenv("DISCORD_REQUIRE_MENTION"):
+                    os.environ["DISCORD_REQUIRE_MENTION"] = str(discord_cfg["require_mention"]).lower()
+                frc = discord_cfg.get("free_response_channels")
+                if frc is not None and not os.getenv("DISCORD_FREE_RESPONSE_CHANNELS"):
+                    if isinstance(frc, list):
+                        frc = ",".join(str(v) for v in frc)
+                    os.environ["DISCORD_FREE_RESPONSE_CHANNELS"] = str(frc)
+                if "auto_thread" in discord_cfg and not os.getenv("DISCORD_AUTO_THREAD"):
+                    os.environ["DISCORD_AUTO_THREAD"] = str(discord_cfg["auto_thread"]).lower()
+
+            # Bridge whatsapp settings from config.yaml into platform config
+            whatsapp_cfg = yaml_cfg.get("whatsapp", {})
+            if isinstance(whatsapp_cfg, dict) and "reply_prefix" in whatsapp_cfg:
+                if Platform.WHATSAPP not in config.platforms:
+                    config.platforms[Platform.WHATSAPP] = PlatformConfig()
+                config.platforms[Platform.WHATSAPP].extra["reply_prefix"] = whatsapp_cfg["reply_prefix"]
     except Exception:
         pass
+
+    config = GatewayConfig.from_dict(gw_data)
 
     # Override with environment variables
     _apply_env_overrides(config)
@@ -316,6 +465,8 @@ def load_gateway_config() -> GatewayConfig:
         Platform.TELEGRAM: "TELEGRAM_BOT_TOKEN",
         Platform.DISCORD: "DISCORD_BOT_TOKEN",
         Platform.SLACK: "SLACK_BOT_TOKEN",
+        Platform.MATTERMOST: "MATTERMOST_TOKEN",
+        Platform.MATRIX: "MATRIX_ACCESS_TOKEN",
     }
     for platform, pconfig in config.platforms.items():
         if not pconfig.enabled:
@@ -409,6 +560,53 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 name=os.getenv("SIGNAL_HOME_CHANNEL_NAME", "Home"),
             )
 
+    # Mattermost
+    mattermost_token = os.getenv("MATTERMOST_TOKEN")
+    if mattermost_token:
+        mattermost_url = os.getenv("MATTERMOST_URL", "")
+        if not mattermost_url:
+            logger.warning("MATTERMOST_TOKEN set but MATTERMOST_URL is missing")
+        if Platform.MATTERMOST not in config.platforms:
+            config.platforms[Platform.MATTERMOST] = PlatformConfig()
+        config.platforms[Platform.MATTERMOST].enabled = True
+        config.platforms[Platform.MATTERMOST].token = mattermost_token
+        config.platforms[Platform.MATTERMOST].extra["url"] = mattermost_url
+        mattermost_home = os.getenv("MATTERMOST_HOME_CHANNEL")
+        if mattermost_home:
+            config.platforms[Platform.MATTERMOST].home_channel = HomeChannel(
+                platform=Platform.MATTERMOST,
+                chat_id=mattermost_home,
+                name=os.getenv("MATTERMOST_HOME_CHANNEL_NAME", "Home"),
+            )
+
+    # Matrix
+    matrix_token = os.getenv("MATRIX_ACCESS_TOKEN")
+    matrix_homeserver = os.getenv("MATRIX_HOMESERVER", "")
+    if matrix_token or os.getenv("MATRIX_PASSWORD"):
+        if not matrix_homeserver:
+            logger.warning("MATRIX_ACCESS_TOKEN/MATRIX_PASSWORD set but MATRIX_HOMESERVER is missing")
+        if Platform.MATRIX not in config.platforms:
+            config.platforms[Platform.MATRIX] = PlatformConfig()
+        config.platforms[Platform.MATRIX].enabled = True
+        if matrix_token:
+            config.platforms[Platform.MATRIX].token = matrix_token
+        config.platforms[Platform.MATRIX].extra["homeserver"] = matrix_homeserver
+        matrix_user = os.getenv("MATRIX_USER_ID", "")
+        if matrix_user:
+            config.platforms[Platform.MATRIX].extra["user_id"] = matrix_user
+        matrix_password = os.getenv("MATRIX_PASSWORD", "")
+        if matrix_password:
+            config.platforms[Platform.MATRIX].extra["password"] = matrix_password
+        matrix_e2ee = os.getenv("MATRIX_ENCRYPTION", "").lower() in ("true", "1", "yes")
+        config.platforms[Platform.MATRIX].extra["encryption"] = matrix_e2ee
+        matrix_home = os.getenv("MATRIX_HOME_ROOM")
+        if matrix_home:
+            config.platforms[Platform.MATRIX].home_channel = HomeChannel(
+                platform=Platform.MATRIX,
+                chat_id=matrix_home,
+                name=os.getenv("MATRIX_HOME_ROOM_NAME", "Home"),
+            )
+
     # Home Assistant
     hass_token = os.getenv("HASS_TOKEN")
     if hass_token:
@@ -419,6 +617,62 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         hass_url = os.getenv("HASS_URL")
         if hass_url:
             config.platforms[Platform.HOMEASSISTANT].extra["url"] = hass_url
+
+    # Email
+    email_addr = os.getenv("EMAIL_ADDRESS")
+    email_pwd = os.getenv("EMAIL_PASSWORD")
+    email_imap = os.getenv("EMAIL_IMAP_HOST")
+    email_smtp = os.getenv("EMAIL_SMTP_HOST")
+    if all([email_addr, email_pwd, email_imap, email_smtp]):
+        if Platform.EMAIL not in config.platforms:
+            config.platforms[Platform.EMAIL] = PlatformConfig()
+        config.platforms[Platform.EMAIL].enabled = True
+        config.platforms[Platform.EMAIL].extra.update({
+            "address": email_addr,
+            "imap_host": email_imap,
+            "smtp_host": email_smtp,
+        })
+        email_home = os.getenv("EMAIL_HOME_ADDRESS")
+        if email_home:
+            config.platforms[Platform.EMAIL].home_channel = HomeChannel(
+                platform=Platform.EMAIL,
+                chat_id=email_home,
+                name=os.getenv("EMAIL_HOME_ADDRESS_NAME", "Home"),
+            )
+
+    # SMS (Twilio)
+    twilio_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    if twilio_sid:
+        if Platform.SMS not in config.platforms:
+            config.platforms[Platform.SMS] = PlatformConfig()
+        config.platforms[Platform.SMS].enabled = True
+        config.platforms[Platform.SMS].api_key = os.getenv("TWILIO_AUTH_TOKEN", "")
+        sms_home = os.getenv("SMS_HOME_CHANNEL")
+        if sms_home:
+            config.platforms[Platform.SMS].home_channel = HomeChannel(
+                platform=Platform.SMS,
+                chat_id=sms_home,
+                name=os.getenv("SMS_HOME_CHANNEL_NAME", "Home"),
+            )
+
+    # API Server
+    api_server_enabled = os.getenv("API_SERVER_ENABLED", "").lower() in ("true", "1", "yes")
+    api_server_key = os.getenv("API_SERVER_KEY", "")
+    api_server_port = os.getenv("API_SERVER_PORT")
+    api_server_host = os.getenv("API_SERVER_HOST")
+    if api_server_enabled or api_server_key:
+        if Platform.API_SERVER not in config.platforms:
+            config.platforms[Platform.API_SERVER] = PlatformConfig()
+        config.platforms[Platform.API_SERVER].enabled = True
+        if api_server_key:
+            config.platforms[Platform.API_SERVER].extra["key"] = api_server_key
+        if api_server_port:
+            try:
+                config.platforms[Platform.API_SERVER].extra["port"] = int(api_server_port)
+            except ValueError:
+                pass
+        if api_server_host:
+            config.platforms[Platform.API_SERVER].extra["host"] = api_server_host
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")
@@ -436,10 +690,4 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             pass
 
 
-def save_gateway_config(config: GatewayConfig) -> None:
-    """Save gateway configuration to ~/.hermes/gateway.json."""
-    gateway_config_path = Path.home() / ".hermes" / "gateway.json"
-    gateway_config_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(gateway_config_path, "w") as f:
-        json.dump(config.to_dict(), f, indent=2)
+
