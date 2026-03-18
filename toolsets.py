@@ -66,6 +66,7 @@ _HERMES_CORE_TOOLS = [
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
     # Devin AI collaboration (gated on DEVIN_API_KEY + DEVIN_ORG_ID via check_fn)
     "devin_create", "devin_send", "devin_read", "devin_status", "devin_list", "devin_switch",
+    "devin_terminate", "devin_knowledge", "devin_playbook",
 ]
 
 
@@ -211,8 +212,12 @@ TOOLSETS = {
     },
 
     "devin": {
-        "description": "Devin AI collaboration -- create sessions, send/read messages, manage session lifecycle",
-        "tools": ["devin_create", "devin_send", "devin_read", "devin_status", "devin_list", "devin_switch"],
+        "description": "Devin AI collaboration -- create sessions, send/read messages, manage session lifecycle, knowledge, and playbooks",
+        "tools": [
+            "devin_create", "devin_send", "devin_read", "devin_status",
+            "devin_list", "devin_switch", "devin_terminate",
+            "devin_knowledge", "devin_playbook",
+        ],
         "includes": []
     },
 
