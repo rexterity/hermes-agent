@@ -6,12 +6,15 @@ the agent can spin up a new Devin session on demand, switch between sessions,
 and persist the active session across restarts.
 
 Tools provided:
-    devin_create   -- Create a new Devin session with a prompt
-    devin_send     -- Send a message to the active (or specified) session
-    devin_read     -- Read messages from the active session (cursor-based polling)
-    devin_status   -- Check session status (active/working/waiting/suspended)
-    devin_list     -- List recent sessions (find existing ones to reconnect)
-    devin_switch   -- Switch the active session to an existing one
+    devin_create    -- Create a new Devin session with a prompt
+    devin_send      -- Send a message to the active (or specified) session
+    devin_read      -- Read messages from the active session (cursor-based polling)
+    devin_status    -- Check session status (active/working/waiting/suspended)
+    devin_list      -- List recent sessions (find existing ones to reconnect)
+    devin_switch    -- Switch the active session to an existing one
+    devin_terminate -- Terminate a running session
+    devin_knowledge -- Manage persistent knowledge notes (CRUD)
+    devin_playbook  -- Manage reusable playbook workflows (CRUD)
 
 Setup:
     Set environment variables:
@@ -267,6 +270,94 @@ DEVIN_SWITCH_SCHEMA = {
     }
 }
 
+DEVIN_TERMINATE_SCHEMA = {
+    "name": "devin_terminate",
+    "description": (
+        "Terminate a running Devin session. Once terminated the session cannot "
+        "be resumed. Use this to stop runaway sessions or clean up finished work."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "session_id": {
+                "type": "string",
+                "description": "Optional session ID to terminate (defaults to active session)"
+            }
+        },
+        "required": []
+    }
+}
+
+DEVIN_KNOWLEDGE_SCHEMA = {
+    "name": "devin_knowledge",
+    "description": (
+        "Manage Devin knowledge notes. Knowledge notes are injected into every "
+        "Devin session that matches the trigger condition, giving Devin persistent "
+        "context about project conventions, coding standards, and architecture.\n\n"
+        "Actions: create, list, update, delete."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["create", "list", "update", "delete"],
+                "description": "The operation to perform"
+            },
+            "note_id": {
+                "type": "string",
+                "description": "Knowledge note ID (required for update and delete)"
+            },
+            "name": {
+                "type": "string",
+                "description": "Name of the knowledge note (required for create)"
+            },
+            "trigger_description": {
+                "type": "string",
+                "description": "When this knowledge should activate, e.g. 'When working on rexterity/* repos'"
+            },
+            "body": {
+                "type": "string",
+                "description": "The knowledge content (required for create, optional for update)"
+            }
+        },
+        "required": ["action"]
+    }
+}
+
+DEVIN_PLAYBOOK_SCHEMA = {
+    "name": "devin_playbook",
+    "description": (
+        "Manage Devin playbooks. Playbooks are reusable workflow templates that "
+        "Devin follows when a session references a playbook_id. Use to standardize "
+        "common task patterns (bug fixes, features, migrations, etc.).\n\n"
+        "Actions: create, list, get, update, delete."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["create", "list", "get", "update", "delete"],
+                "description": "The operation to perform"
+            },
+            "playbook_id": {
+                "type": "string",
+                "description": "Playbook ID (required for get, update, delete)"
+            },
+            "name": {
+                "type": "string",
+                "description": "Name of the playbook (required for create)"
+            },
+            "body": {
+                "type": "string",
+                "description": "Playbook instructions (required for create, optional for update)"
+            }
+        },
+        "required": ["action"]
+    }
+}
+
 
 # ---------------------------------------------------------------------------
 # HTTP helpers
@@ -295,11 +386,17 @@ async def _api_request(method: str, path: str, body: dict = None) -> dict:
             resp = await client.get(url, headers=headers)
         elif method == "POST":
             resp = await client.post(url, headers=headers, json=body or {})
+        elif method == "PUT":
+            resp = await client.put(url, headers=headers, json=body or {})
+        elif method == "DELETE":
+            resp = await client.delete(url, headers=headers)
         else:
             return {"error": f"Unsupported method: {method}"}
 
         if resp.status_code >= 400:
             return {"error": f"Devin API error ({resp.status_code}): {resp.text[:500]}"}
+        if resp.status_code == 204:
+            return {"success": True}
         return resp.json()
 
 
@@ -326,6 +423,20 @@ async def _api_request_aiohttp(method: str, path: str, body: dict = None) -> dic
                 if resp.status >= 400:
                     text = await resp.text()
                     return {"error": f"Devin API error ({resp.status}): {text[:500]}"}
+                return await resp.json()
+        elif method == "PUT":
+            async with session.put(url, headers=headers, json=body or {}) as resp:
+                if resp.status >= 400:
+                    text = await resp.text()
+                    return {"error": f"Devin API error ({resp.status}): {text[:500]}"}
+                return await resp.json()
+        elif method == "DELETE":
+            async with session.delete(url, headers=headers) as resp:
+                if resp.status >= 400:
+                    text = await resp.text()
+                    return {"error": f"Devin API error ({resp.status}): {text[:500]}"}
+                if resp.status == 204:
+                    return {"success": True}
                 return await resp.json()
     return {"error": f"Unsupported method: {method}"}
 
@@ -548,6 +659,185 @@ async def _devin_switch_async(args: dict) -> str:
     })
 
 
+async def _devin_terminate_async(args: dict) -> str:
+    """Terminate a Devin session."""
+    session_id = args.get("session_id") or _get_active_session_id()
+    if not session_id:
+        return json.dumps({
+            "error": "No active Devin session. Use devin_create or devin_switch first."
+        })
+
+    result = await _api_request("POST", f"/sessions/{_devin_id(session_id)}/terminate")
+
+    if "error" in result:
+        return json.dumps(result)
+
+    return json.dumps({
+        "success": True,
+        "session_id": session_id,
+        "message": f"Session {session_id} terminated.",
+    })
+
+
+async def _devin_knowledge_async(args: dict) -> str:
+    """Manage Devin knowledge notes (CRUD)."""
+    action = (args.get("action") or "").strip().lower()
+
+    if action == "list":
+        result = await _api_request("GET", "/knowledge/notes")
+        if "error" in result:
+            return json.dumps(result)
+        items = result if isinstance(result, list) else result.get("items", [])
+        notes = []
+        for note in items:
+            notes.append({
+                "id": note.get("id", ""),
+                "name": note.get("name", ""),
+                "trigger_description": note.get("trigger_description", ""),
+                "body_preview": (note.get("body") or "")[:200],
+            })
+        return json.dumps({"success": True, "count": len(notes), "notes": notes})
+
+    if action == "create":
+        name = (args.get("name") or "").strip()
+        body = (args.get("body") or "").strip()
+        if not name or not body:
+            return json.dumps({"error": "name and body are required for create"})
+        payload = {"name": name, "body": body}
+        trigger = (args.get("trigger_description") or "").strip()
+        if trigger:
+            payload["trigger_description"] = trigger
+        result = await _api_request("POST", "/knowledge/notes", payload)
+        if "error" in result:
+            return json.dumps(result)
+        return json.dumps({
+            "success": True,
+            "id": result.get("id", ""),
+            "name": result.get("name", name),
+            "message": f"Knowledge note '{name}' created.",
+        })
+
+    if action == "update":
+        note_id = (args.get("note_id") or "").strip()
+        if not note_id:
+            return json.dumps({"error": "note_id is required for update"})
+        payload = {}
+        if args.get("name"):
+            payload["name"] = args["name"].strip()
+        if args.get("body"):
+            payload["body"] = args["body"].strip()
+        if args.get("trigger_description"):
+            payload["trigger_description"] = args["trigger_description"].strip()
+        if not payload:
+            return json.dumps({"error": "Nothing to update. Provide name, body, or trigger_description."})
+        result = await _api_request("PUT", f"/knowledge/notes/{note_id}", payload)
+        if "error" in result:
+            return json.dumps(result)
+        return json.dumps({
+            "success": True,
+            "id": note_id,
+            "message": f"Knowledge note '{note_id}' updated.",
+        })
+
+    if action == "delete":
+        note_id = (args.get("note_id") or "").strip()
+        if not note_id:
+            return json.dumps({"error": "note_id is required for delete"})
+        result = await _api_request("DELETE", f"/knowledge/notes/{note_id}")
+        if "error" in result:
+            return json.dumps(result)
+        return json.dumps({
+            "success": True,
+            "id": note_id,
+            "message": f"Knowledge note '{note_id}' deleted.",
+        })
+
+    return json.dumps({"error": f"Unknown action '{action}'. Use: create, list, update, delete."})
+
+
+async def _devin_playbook_async(args: dict) -> str:
+    """Manage Devin playbooks (CRUD)."""
+    action = (args.get("action") or "").strip().lower()
+
+    if action == "list":
+        result = await _api_request("GET", "/playbooks")
+        if "error" in result:
+            return json.dumps(result)
+        items = result if isinstance(result, list) else result.get("items", [])
+        playbooks = []
+        for pb in items:
+            playbooks.append({
+                "id": pb.get("id", ""),
+                "name": pb.get("name", ""),
+                "body_preview": (pb.get("body") or "")[:200],
+            })
+        return json.dumps({"success": True, "count": len(playbooks), "playbooks": playbooks})
+
+    if action == "get":
+        playbook_id = (args.get("playbook_id") or "").strip()
+        if not playbook_id:
+            return json.dumps({"error": "playbook_id is required for get"})
+        result = await _api_request("GET", f"/playbooks/{playbook_id}")
+        if "error" in result:
+            return json.dumps(result)
+        return json.dumps({
+            "success": True,
+            "id": result.get("id", ""),
+            "name": result.get("name", ""),
+            "body": result.get("body", ""),
+        })
+
+    if action == "create":
+        name = (args.get("name") or "").strip()
+        body = (args.get("body") or "").strip()
+        if not name or not body:
+            return json.dumps({"error": "name and body are required for create"})
+        result = await _api_request("POST", "/playbooks", {"name": name, "body": body})
+        if "error" in result:
+            return json.dumps(result)
+        return json.dumps({
+            "success": True,
+            "id": result.get("id", ""),
+            "name": result.get("name", name),
+            "message": f"Playbook '{name}' created.",
+        })
+
+    if action == "update":
+        playbook_id = (args.get("playbook_id") or "").strip()
+        if not playbook_id:
+            return json.dumps({"error": "playbook_id is required for update"})
+        payload = {}
+        if args.get("name"):
+            payload["name"] = args["name"].strip()
+        if args.get("body"):
+            payload["body"] = args["body"].strip()
+        if not payload:
+            return json.dumps({"error": "Nothing to update. Provide name or body."})
+        result = await _api_request("PUT", f"/playbooks/{playbook_id}", payload)
+        if "error" in result:
+            return json.dumps(result)
+        return json.dumps({
+            "success": True,
+            "id": playbook_id,
+            "message": f"Playbook '{playbook_id}' updated.",
+        })
+
+    if action == "delete":
+        playbook_id = (args.get("playbook_id") or "").strip()
+        if not playbook_id:
+            return json.dumps({"error": "playbook_id is required for delete"})
+        result = await _api_request("DELETE", f"/playbooks/{playbook_id}")
+        if "error" in result:
+            return json.dumps(result)
+        return json.dumps({
+            "success": True,
+            "id": playbook_id,
+            "message": f"Playbook '{playbook_id}' deleted.",
+        })
+
+    return json.dumps({"error": f"Unknown action '{action}'. Use: create, list, get, update, delete."})
+
+
 # ---------------------------------------------------------------------------
 # Sync wrappers (registry dispatches sync; async bridged by model_tools)
 # ---------------------------------------------------------------------------
@@ -575,6 +865,18 @@ def devin_list_tool(args, **kw):
 def devin_switch_tool(args, **kw):
     from model_tools import _run_async
     return _run_async(_devin_switch_async(args))
+
+def devin_terminate_tool(args, **kw):
+    from model_tools import _run_async
+    return _run_async(_devin_terminate_async(args))
+
+def devin_knowledge_tool(args, **kw):
+    from model_tools import _run_async
+    return _run_async(_devin_knowledge_async(args))
+
+def devin_playbook_tool(args, **kw):
+    from model_tools import _run_async
+    return _run_async(_devin_playbook_async(args))
 
 
 # ---------------------------------------------------------------------------
@@ -641,4 +943,34 @@ registry.register(
     check_fn=_check_devin,
     requires_env=["DEVIN_API_KEY", "DEVIN_ORG_ID"],
     description="Switch the active Devin session to an existing one",
+)
+
+registry.register(
+    name="devin_terminate",
+    toolset="devin",
+    schema=DEVIN_TERMINATE_SCHEMA,
+    handler=devin_terminate_tool,
+    check_fn=_check_devin,
+    requires_env=["DEVIN_API_KEY", "DEVIN_ORG_ID"],
+    description="Terminate a running Devin session",
+)
+
+registry.register(
+    name="devin_knowledge",
+    toolset="devin",
+    schema=DEVIN_KNOWLEDGE_SCHEMA,
+    handler=devin_knowledge_tool,
+    check_fn=_check_devin,
+    requires_env=["DEVIN_API_KEY", "DEVIN_ORG_ID"],
+    description="Manage Devin knowledge notes for persistent cross-session context",
+)
+
+registry.register(
+    name="devin_playbook",
+    toolset="devin",
+    schema=DEVIN_PLAYBOOK_SCHEMA,
+    handler=devin_playbook_tool,
+    check_fn=_check_devin,
+    requires_env=["DEVIN_API_KEY", "DEVIN_ORG_ID"],
+    description="Manage Devin playbooks for reusable workflow templates",
 )
