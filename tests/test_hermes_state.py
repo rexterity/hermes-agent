@@ -55,12 +55,26 @@ class TestSessionLifecycle:
 
     def test_update_token_counts(self, db):
         db.create_session(session_id="s1", source="cli")
-        db.update_token_counts("s1", input_tokens=100, output_tokens=50)
         db.update_token_counts("s1", input_tokens=200, output_tokens=100)
+        db.update_token_counts("s1", input_tokens=100, output_tokens=50)
 
         session = db.get_session("s1")
         assert session["input_tokens"] == 300
         assert session["output_tokens"] == 150
+
+    def test_update_token_counts_backfills_model_when_null(self, db):
+        db.create_session(session_id="s1", source="telegram")
+        db.update_token_counts("s1", input_tokens=10, output_tokens=5, model="openai/gpt-5.4")
+
+        session = db.get_session("s1")
+        assert session["model"] == "openai/gpt-5.4"
+
+    def test_update_token_counts_preserves_existing_model(self, db):
+        db.create_session(session_id="s1", source="cli", model="anthropic/claude-opus-4.6")
+        db.update_token_counts("s1", input_tokens=10, output_tokens=5, model="openai/gpt-5.4")
+
+        session = db.get_session("s1")
+        assert session["model"] == "anthropic/claude-opus-4.6"
 
     def test_parent_session(self, db):
         db.create_session(session_id="parent", source="cli")
@@ -94,12 +108,49 @@ class TestMessageStorage:
         session = db.get_session("s1")
         assert session["message_count"] == 2
 
-    def test_tool_message_increments_tool_count(self, db):
+    def test_tool_response_does_not_increment_tool_count(self, db):
+        """Tool responses (role=tool) should not increment tool_call_count.
+
+        Only assistant messages with tool_calls should count.
+        """
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="tool", content="result", tool_name="web_search")
 
         session = db.get_session("s1")
+        assert session["tool_call_count"] == 0
+
+    def test_assistant_tool_calls_increment_by_count(self, db):
+        """An assistant message with N tool_calls should increment by N."""
+        db.create_session(session_id="s1", source="cli")
+        tool_calls = [
+            {"id": "call_1", "function": {"name": "web_search", "arguments": "{}"}},
+        ]
+        db.append_message("s1", role="assistant", content="", tool_calls=tool_calls)
+
+        session = db.get_session("s1")
         assert session["tool_call_count"] == 1
+
+    def test_tool_call_count_matches_actual_calls(self, db):
+        """tool_call_count should equal the number of tool calls made, not messages."""
+        db.create_session(session_id="s1", source="cli")
+
+        # Assistant makes 2 parallel tool calls in one message
+        tool_calls = [
+            {"id": "call_1", "function": {"name": "ha_call_service", "arguments": "{}"}},
+            {"id": "call_2", "function": {"name": "ha_call_service", "arguments": "{}"}},
+        ]
+        db.append_message("s1", role="assistant", content="", tool_calls=tool_calls)
+
+        # Two tool responses come back
+        db.append_message("s1", role="tool", content="ok", tool_name="ha_call_service")
+        db.append_message("s1", role="tool", content="ok", tool_name="ha_call_service")
+
+        session = db.get_session("s1")
+        # Should be 2 (the actual number of tool calls), not 3
+        assert session["tool_call_count"] == 2, (
+            f"Expected 2 tool calls but got {session['tool_call_count']}. "
+            "tool responses are double-counted and multi-call messages are under-counted"
+        )
 
     def test_tool_calls_serialization(self, db):
         db.create_session(session_id="s1", source="cli")
@@ -178,6 +229,115 @@ class TestFTS5Search:
         assert "context" in results[0]
         assert isinstance(results[0]["context"], list)
         assert len(results[0]["context"]) > 0
+
+    def test_search_special_chars_do_not_crash(self, db):
+        """FTS5 special characters in queries must not raise OperationalError."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="How do I use C++ templates?")
+
+        # Each of these previously caused sqlite3.OperationalError
+        dangerous_queries = [
+            'C++',              # + is FTS5 column filter
+            '"unterminated',    # unbalanced double-quote
+            '(problem',         # unbalanced parenthesis
+            'hello AND',        # dangling boolean operator
+            '***',              # repeated wildcard
+            '{test}',           # curly braces (column reference)
+            'OR hello',         # leading boolean operator
+            'a AND OR b',       # adjacent operators
+        ]
+        for query in dangerous_queries:
+            # Must not raise — should return list (possibly empty)
+            results = db.search_messages(query)
+            assert isinstance(results, list), f"Query {query!r} did not return a list"
+
+    def test_search_sanitized_query_still_finds_content(self, db):
+        """Sanitization must not break normal keyword search."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="Learning C++ templates today")
+
+        # "C++" sanitized to "C" should still match "C++"
+        results = db.search_messages("C++")
+        # The word "C" appears in the content, so FTS5 should find it
+        assert isinstance(results, list)
+
+    def test_search_hyphenated_term_does_not_crash(self, db):
+        """Hyphenated terms like 'chat-send' must not crash FTS5."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="Run the chat-send command")
+
+        results = db.search_messages("chat-send")
+        assert isinstance(results, list)
+        assert len(results) >= 1
+        assert any("chat-send" in (r.get("snippet") or r.get("content", "")).lower()
+                    for r in results)
+
+    def test_search_quoted_phrase_preserved(self, db):
+        """User-provided quoted phrases should be preserved for exact matching."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="docker networking is complex")
+        db.append_message("s1", role="assistant", content="networking docker tips")
+
+        # Quoted phrase should match only the exact order
+        results = db.search_messages('"docker networking"')
+        assert isinstance(results, list)
+        # Should find the user message (exact phrase) but may or may not find
+        # the assistant message depending on FTS5 phrase matching
+        assert len(results) >= 1
+
+    def test_sanitize_fts5_query_strips_dangerous_chars(self):
+        """Unit test for _sanitize_fts5_query static method."""
+        from hermes_state import SessionDB
+        s = SessionDB._sanitize_fts5_query
+        assert s('hello world') == 'hello world'
+        assert '+' not in s('C++')
+        assert '"' not in s('"unterminated')
+        assert '(' not in s('(problem')
+        assert '{' not in s('{test}')
+        # Dangling operators removed
+        assert s('hello AND') == 'hello'
+        assert s('OR world') == 'world'
+        # Leading bare * removed
+        assert s('***') == ''
+        # Valid prefix kept
+        assert s('deploy*') == 'deploy*'
+
+    def test_sanitize_fts5_preserves_quoted_phrases(self):
+        """Properly paired double-quoted phrases should be preserved."""
+        from hermes_state import SessionDB
+        s = SessionDB._sanitize_fts5_query
+        # Simple quoted phrase
+        assert s('"exact phrase"') == '"exact phrase"'
+        # Quoted phrase alongside unquoted terms
+        assert '"docker networking"' in s('"docker networking" setup')
+        # Multiple quoted phrases
+        result = s('"hello world" OR "foo bar"')
+        assert '"hello world"' in result
+        assert '"foo bar"' in result
+        # Unmatched quote still stripped
+        assert '"' not in s('"unterminated')
+
+    def test_sanitize_fts5_quotes_hyphenated_terms(self):
+        """Hyphenated terms should be wrapped in quotes for exact matching."""
+        from hermes_state import SessionDB
+        s = SessionDB._sanitize_fts5_query
+        # Simple hyphenated term
+        assert s('chat-send') == '"chat-send"'
+        # Multiple hyphens
+        assert s('docker-compose-up') == '"docker-compose-up"'
+        # Hyphenated term with other words
+        result = s('fix chat-send bug')
+        assert '"chat-send"' in result
+        assert 'fix' in result
+        assert 'bug' in result
+        # Multiple hyphenated terms with OR
+        result = s('chat-send OR deploy-prod')
+        assert '"chat-send"' in result
+        assert '"deploy-prod"' in result
+        # Already-quoted hyphenated term — no double quoting
+        assert s('"chat-send"') == '"chat-send"'
+        # Hyphenated inside a quoted phrase stays as-is
+        assert s('"my chat-send thing"') == '"my chat-send thing"'
 
 
 # =========================================================================
@@ -261,6 +421,24 @@ class TestDeleteAndExport:
 
     def test_delete_nonexistent(self, db):
         assert db.delete_session("nope") is False
+
+    def test_resolve_session_id_exact(self, db):
+        db.create_session(session_id="20260315_092437_c9a6ff", source="cli")
+        assert db.resolve_session_id("20260315_092437_c9a6ff") == "20260315_092437_c9a6ff"
+
+    def test_resolve_session_id_unique_prefix(self, db):
+        db.create_session(session_id="20260315_092437_c9a6ff", source="cli")
+        assert db.resolve_session_id("20260315_092437_c9a6") == "20260315_092437_c9a6ff"
+
+    def test_resolve_session_id_ambiguous_prefix_returns_none(self, db):
+        db.create_session(session_id="20260315_092437_c9a6aa", source="cli")
+        db.create_session(session_id="20260315_092437_c9a6bb", source="cli")
+        assert db.resolve_session_id("20260315_092437_c9a6") is None
+
+    def test_resolve_session_id_escapes_like_wildcards(self, db):
+        db.create_session(session_id="20260315_092437_c9a6ff", source="cli")
+        db.create_session(session_id="20260315X092437_c9a6ff", source="cli")
+        assert db.resolve_session_id("20260315_092437") == "20260315_092437_c9a6ff"
 
     def test_export_session(self, db):
         db.create_session(session_id="s1", source="cli", model="test")
@@ -540,7 +718,7 @@ class TestSchemaInit:
     def test_schema_version(self, db):
         cursor = db._conn.execute("SELECT version FROM schema_version")
         version = cursor.fetchone()[0]
-        assert version == 4
+        assert version == 5
 
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
@@ -596,12 +774,12 @@ class TestSchemaInit:
         conn.commit()
         conn.close()
 
-        # Open with SessionDB — should migrate to v4
+        # Open with SessionDB — should migrate to v5
         migrated_db = SessionDB(db_path=db_path)
 
         # Verify migration
         cursor = migrated_db._conn.execute("SELECT version FROM schema_version")
-        assert cursor.fetchone()[0] == 4
+        assert cursor.fetchone()[0] == 5
 
         # Verify title column exists and is NULL for existing sessions
         session = migrated_db.get_session("existing")

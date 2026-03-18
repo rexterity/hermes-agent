@@ -26,6 +26,8 @@ _IS_WINDOWS = platform.system() == "Windows"
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+from hermes_cli.config import get_hermes_home
+
 logger = logging.getLogger(__name__)
 
 
@@ -132,8 +134,9 @@ class WhatsAppAdapter(BasePlatformAdapter):
         )
         self._session_path: Path = Path(config.extra.get(
             "session_path",
-            Path.home() / ".hermes" / "whatsapp" / "session"
+            get_hermes_home() / "whatsapp" / "session"
         ))
+        self._reply_prefix: Optional[str] = config.extra.get("reply_prefix")
         self._message_queue: asyncio.Queue = asyncio.Queue()
         self._bridge_log_fh = None
         self._bridge_log: Optional[Path] = None
@@ -181,8 +184,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
             
             # Kill any orphaned bridge from a previous gateway run
             _kill_port_process(self._bridge_port)
-            import time
-            time.sleep(1)
+            import asyncio
+            await asyncio.sleep(1)
             
             # Start the bridge process in its own process group.
             # Route output to a log file so QR codes, errors, and reconnection
@@ -191,6 +194,14 @@ class WhatsAppAdapter(BasePlatformAdapter):
             self._bridge_log = self._session_path.parent / "bridge.log"
             bridge_log_fh = open(self._bridge_log, "a")
             self._bridge_log_fh = bridge_log_fh
+
+            # Build bridge subprocess environment.
+            # Pass WHATSAPP_REPLY_PREFIX from config.yaml so the Node bridge
+            # can use it without the user needing to set a separate env var.
+            bridge_env = os.environ.copy()
+            if self._reply_prefix is not None:
+                bridge_env["WHATSAPP_REPLY_PREFIX"] = self._reply_prefix
+
             self._bridge_process = subprocess.Popen(
                 [
                     "node",
@@ -202,6 +213,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 stdout=bridge_log_fh,
                 stderr=bridge_log_fh,
                 preexec_fn=None if _IS_WINDOWS else os.setsid,
+                env=bridge_env,
             )
             
             # Wait for the bridge to connect to WhatsApp.
@@ -493,7 +505,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
             file_name or os.path.basename(file_path),
         )
 
-    async def send_typing(self, chat_id: str) -> None:
+    async def send_typing(self, chat_id: str, metadata=None) -> None:
         """Send typing indicator via bridge."""
         if not self._running:
             return

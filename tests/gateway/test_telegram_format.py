@@ -7,7 +7,7 @@ or corrupt user-visible content.
 
 import re
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -34,7 +34,7 @@ def _ensure_telegram_mock():
 
 _ensure_telegram_mock()
 
-from gateway.platforms.telegram import TelegramAdapter, _escape_mdv2  # noqa: E402
+from gateway.platforms.telegram import TelegramAdapter, _escape_mdv2, _strip_mdv2  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -360,3 +360,59 @@ class TestFormatMessageComplex:
         assert "Header" in result
         assert "block" in result
         assert "url.com" in result
+
+
+# =========================================================================
+# _strip_mdv2 — plaintext fallback
+# =========================================================================
+
+
+class TestStripMdv2:
+    def test_removes_escape_backslashes(self):
+        assert _strip_mdv2(r"hello\.world\!") == "hello.world!"
+
+    def test_removes_bold_markers(self):
+        assert _strip_mdv2("*bold text*") == "bold text"
+
+    def test_removes_italic_markers(self):
+        assert _strip_mdv2("_italic text_") == "italic text"
+
+    def test_removes_both_bold_and_italic(self):
+        result = _strip_mdv2("*bold* and _italic_")
+        assert result == "bold and italic"
+
+    def test_preserves_snake_case(self):
+        assert _strip_mdv2("my_variable_name") == "my_variable_name"
+
+    def test_preserves_multi_underscore_identifier(self):
+        assert _strip_mdv2("some_func_call here") == "some_func_call here"
+
+    def test_plain_text_unchanged(self):
+        assert _strip_mdv2("plain text") == "plain text"
+
+    def test_empty_string(self):
+        assert _strip_mdv2("") == ""
+
+
+@pytest.mark.asyncio
+async def test_send_escapes_chunk_indicator_for_markdownv2(adapter):
+    adapter.MAX_MESSAGE_LENGTH = 80
+    adapter._bot = MagicMock()
+
+    sent_texts = []
+
+    async def _fake_send_message(**kwargs):
+        sent_texts.append(kwargs["text"])
+        msg = MagicMock()
+        msg.message_id = len(sent_texts)
+        return msg
+
+    adapter._bot.send_message = AsyncMock(side_effect=_fake_send_message)
+
+    content = ("**bold** chunk content " * 12).strip()
+    result = await adapter.send("123", content)
+
+    assert result.success is True
+    assert len(sent_texts) > 1
+    assert re.search(r" \\\([0-9]+/[0-9]+\\\)$", sent_texts[0])
+    assert re.search(r" \\\([0-9]+/[0-9]+\\\)$", sent_texts[-1])

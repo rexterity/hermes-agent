@@ -45,7 +45,7 @@ _HERMES_CORE_TOOLS = [
     "browser_navigate", "browser_snapshot", "browser_click",
     "browser_type", "browser_scroll", "browser_back",
     "browser_press", "browser_close", "browser_get_images",
-    "browser_vision",
+    "browser_vision", "browser_console",
     # Text-to-speech
     "text_to_speech",
     # Planning & memory
@@ -57,11 +57,11 @@ _HERMES_CORE_TOOLS = [
     # Code execution + delegation
     "execute_code", "delegate_task",
     # Cronjob management
-    "schedule_cronjob", "list_cronjobs", "remove_cronjob",
+    "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
-    # Honcho user context (gated on honcho being active via check_fn)
-    "query_user_context",
+    # Honcho memory tools (gated on honcho being active via check_fn)
+    "honcho_context", "honcho_profile", "honcho_search", "honcho_conclude",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
 ]
@@ -119,14 +119,20 @@ TOOLSETS = {
             "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_close", "browser_get_images",
-            "browser_vision", "web_search"
+            "browser_vision", "browser_console", "web_search"
         ],
         "includes": []
     },
     
     "cronjob": {
-        "description": "Cronjob management tools - schedule, list, and remove automated tasks",
-        "tools": ["schedule_cronjob", "list_cronjobs", "remove_cronjob"],
+        "description": "Cronjob management tool - create, list, update, pause, resume, remove, and trigger scheduled tasks",
+        "tools": ["cronjob"],
+        "includes": []
+    },
+    
+    "messaging": {
+        "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
+        "tools": ["send_message"],
         "includes": []
     },
     
@@ -192,7 +198,7 @@ TOOLSETS = {
 
     "honcho": {
         "description": "Honcho AI-native memory for persistent cross-session user modeling",
-        "tools": ["query_user_context"],
+        "tools": ["honcho_context", "honcho_profile", "honcho_search", "honcho_conclude"],
         "includes": []
     },
 
@@ -224,6 +230,25 @@ TOOLSETS = {
     # All platforms share the same core tools (including send_message,
     # which is gated on gateway running via its check_fn).
     # ==========================================================================
+
+    "hermes-acp": {
+        "description": "Editor integration (VS Code, Zed, JetBrains) — coding-focused tools without messaging, audio, or clarify UI",
+        "tools": [
+            "web_search", "web_extract",
+            "terminal", "process",
+            "read_file", "write_file", "patch", "search_files",
+            "vision_analyze",
+            "skills_list", "skill_view", "skill_manage",
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_close", "browser_get_images",
+            "browser_vision", "browser_console",
+            "todo", "memory",
+            "session_search",
+            "execute_code", "delegate_task",
+        ],
+        "includes": []
+    },
     
     "hermes-cli": {
         "description": "Full interactive CLI toolset - all default tools plus cronjob management",
@@ -267,10 +292,22 @@ TOOLSETS = {
         "includes": []
     },
 
+    "hermes-email": {
+        "description": "Email bot toolset - interact with Hermes via email (IMAP/SMTP)",
+        "tools": _HERMES_CORE_TOOLS,
+        "includes": []
+    },
+
+    "hermes-sms": {
+        "description": "SMS bot toolset - interact with Hermes via SMS (Twilio)",
+        "tools": _HERMES_CORE_TOOLS,
+        "includes": []
+    },
+
     "hermes-gateway": {
         "description": "Gateway toolset - union of all messaging platform tools",
         "tools": [],
-        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-homeassistant"]
+        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-homeassistant", "hermes-email", "hermes-sms"]
     }
 }
 

@@ -22,13 +22,7 @@ import os
 import logging
 from typing import Dict, Any, List, Optional, Union
 
-from openai import AsyncOpenAI, OpenAI
-
-from agent.auxiliary_client import get_async_text_auxiliary_client
-
-# Resolve the async auxiliary client at import time so we have the model slug.
-# Handles Codex Responses API adapter transparently.
-_async_aux_client, _SUMMARIZER_MODEL = get_async_text_auxiliary_client()
+from agent.auxiliary_client import async_call_llm
 MAX_SESSION_CHARS = 100_000
 MAX_SUMMARY_TOKENS = 10000
 
@@ -53,9 +47,9 @@ def _format_timestamp(ts: Union[int, float, str, None]) -> str:
             return ts
     except (ValueError, OSError, OverflowError) as e:
         # Log specific errors for debugging while gracefully handling edge cases
-        logging.debug("Failed to format timestamp %s: %s", ts, e)
+        logging.debug("Failed to format timestamp %s: %s", ts, e, exc_info=True)
     except Exception as e:
-        logging.debug("Unexpected error formatting timestamp %s: %s", ts, e)
+        logging.debug("Unexpected error formatting timestamp %s: %s", ts, e, exc_info=True)
     return str(ts)
 
 
@@ -156,31 +150,32 @@ async def _summarize_session(
         f"Summarize this conversation with focus on: {query}"
     )
 
-    if _async_aux_client is None or _SUMMARIZER_MODEL is None:
-        logging.warning("No auxiliary model available for session summarization")
-        return None
-
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            from agent.auxiliary_client import get_auxiliary_extra_body, auxiliary_max_tokens_param
-            _extra = get_auxiliary_extra_body()
-            response = await _async_aux_client.chat.completions.create(
-                model=_SUMMARIZER_MODEL,
+            response = await async_call_llm(
+                task="session_search",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                **({} if not _extra else {"extra_body": _extra}),
                 temperature=0.1,
-                **auxiliary_max_tokens_param(MAX_SUMMARY_TOKENS),
+                max_tokens=MAX_SUMMARY_TOKENS,
             )
             return response.choices[0].message.content.strip()
+        except RuntimeError:
+            logging.warning("No auxiliary model available for session summarization")
+            return None
         except Exception as e:
             if attempt < max_retries - 1:
                 await asyncio.sleep(1 * (attempt + 1))
             else:
-                logging.warning(f"Session summarization failed after {max_retries} attempts: {e}")
+                logging.warning(
+                    "Session summarization failed after %d attempts: %s",
+                    max_retries,
+                    e,
+                    exc_info=True,
+                )
                 return None
 
 
@@ -247,7 +242,12 @@ def session_search(
                     else:
                         break
                 except Exception as e:
-                    logging.debug("Error resolving parent for session %s: %s", sid, e)
+                    logging.debug(
+                        "Error resolving parent for session %s: %s",
+                        sid,
+                        e,
+                        exc_info=True,
+                    )
                     break
             return sid
 
@@ -280,7 +280,12 @@ def session_search(
                 conversation_text = _truncate_around_matches(conversation_text, query)
                 tasks.append((session_id, match_info, conversation_text, session_meta))
             except Exception as e:
-                logging.warning(f"Failed to prepare session {session_id}: {e}")
+                logging.warning(
+                    "Failed to prepare session %s: %s",
+                    session_id,
+                    e,
+                    exc_info=True,
+                )
 
         # Summarize all sessions in parallel
         async def _summarize_all() -> List[Union[str, Exception]]:
@@ -299,7 +304,10 @@ def session_search(
             # No event loop running, create a new one
             results = asyncio.run(_summarize_all())
         except concurrent.futures.TimeoutError:
-            logging.warning("Session summarization timed out after 60 seconds")
+            logging.warning(
+                "Session summarization timed out after 60 seconds",
+                exc_info=True,
+            )
             return json.dumps({
                 "success": False,
                 "error": "Session summarization timed out. Try a more specific query or reduce the limit.",
@@ -308,7 +316,12 @@ def session_search(
         summaries = []
         for (session_id, match_info, _, _), result in zip(tasks, results):
             if isinstance(result, Exception):
-                logging.warning(f"Failed to summarize session {session_id}: {result}")
+                logging.warning(
+                    "Failed to summarize session %s: %s",
+                    session_id,
+                    result,
+                    exc_info=True,
+                )
                 continue
             if result:
                 summaries.append({
@@ -328,13 +341,12 @@ def session_search(
         }, ensure_ascii=False)
 
     except Exception as e:
+        logging.error("Session search failed: %s", e, exc_info=True)
         return json.dumps({"success": False, "error": f"Search failed: {str(e)}"}, ensure_ascii=False)
 
 
 def check_session_search_requirements() -> bool:
     """Requires SQLite state database and an auxiliary text model."""
-    if _async_aux_client is None:
-        return False
     try:
         from hermes_state import DEFAULT_DB_PATH
         return DEFAULT_DB_PATH.parent.exists()
@@ -353,8 +365,8 @@ SESSION_SEARCH_SCHEMA = {
         "- The user references a project, person, or concept that seems familiar but isn't in memory\n"
         "- You want to check if you've solved a similar problem before\n"
         "- The user asks 'what did we do about X?' or 'how did we fix Y?'\n\n"
-        "Don't hesitate to search -- it's fast and cheap. Better to search and confirm "
-        "than to guess or ask the user to repeat themselves.\n\n"
+        "Don't hesitate to search when it is actually cross-session -- it's fast and cheap. "
+        "Better to search and confirm than to guess or ask the user to repeat themselves.\n\n"
         "Search syntax: keywords joined with OR for broad recall (elevenlabs OR baseten OR funding), "
         "phrases for exact match (\"docker networking\"), boolean (python NOT java), prefix (deploy*). "
         "IMPORTANT: Use OR between keywords for best results — FTS5 defaults to AND which misses "
@@ -397,4 +409,5 @@ registry.register(
         db=kw.get("db"),
         current_session_id=kw.get("current_session_id")),
     check_fn=check_session_search_requirements,
+    emoji="🔍",
 )

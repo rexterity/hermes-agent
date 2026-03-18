@@ -8,8 +8,9 @@ Hooks are discovered from ~/.hermes/hooks/ directories, each containing:
 
 Events:
   - gateway:startup     -- Gateway process starts
-  - session:start       -- New session created
-  - session:reset       -- User ran /new or /reset
+  - session:start       -- New session created (first message of a new session)
+  - session:end         -- Session ends (user ran /new or /reset)
+  - session:reset       -- Session reset completed (new session entry created)
   - agent:start         -- Agent begins processing a message
   - agent:step          -- Each turn in the tool-calling loop
   - agent:end           -- Agent finishes processing
@@ -26,8 +27,10 @@ from typing import Any, Callable, Dict, List, Optional
 
 import yaml
 
+from hermes_cli.config import get_hermes_home
 
-HOOKS_DIR = Path(os.path.expanduser("~/.hermes/hooks"))
+
+HOOKS_DIR = get_hermes_home() / "hooks"
 
 
 class HookRegistry:

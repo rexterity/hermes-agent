@@ -5,6 +5,7 @@ handling without requiring a running terminal environment.
 """
 
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 from tools.file_tools import (
@@ -38,6 +39,7 @@ class TestReadFileHandler:
     def test_returns_file_content(self, mock_get):
         mock_ops = MagicMock()
         result_obj = MagicMock()
+        result_obj.content = "line1\nline2"
         result_obj.to_dict.return_value = {"content": "line1\nline2", "total_lines": 2}
         mock_ops.read_file.return_value = result_obj
         mock_get.return_value = mock_ops
@@ -52,6 +54,7 @@ class TestReadFileHandler:
     def test_custom_offset_and_limit(self, mock_get):
         mock_ops = MagicMock()
         result_obj = MagicMock()
+        result_obj.content = "line10"
         result_obj.to_dict.return_value = {"content": "line10", "total_lines": 50}
         mock_ops.read_file.return_value = result_obj
         mock_get.return_value = mock_ops
@@ -85,13 +88,26 @@ class TestWriteFileHandler:
         mock_ops.write_file.assert_called_once_with("/tmp/out.txt", "hello world!\n")
 
     @patch("tools.file_tools._get_file_ops")
-    def test_exception_returns_error_json(self, mock_get):
+    def test_permission_error_returns_error_json_without_error_log(self, mock_get, caplog):
         mock_get.side_effect = PermissionError("read-only filesystem")
 
         from tools.file_tools import write_file_tool
-        result = json.loads(write_file_tool("/tmp/out.txt", "data"))
+        with caplog.at_level(logging.DEBUG, logger="tools.file_tools"):
+            result = json.loads(write_file_tool("/tmp/out.txt", "data"))
         assert "error" in result
         assert "read-only" in result["error"]
+        assert any("write_file expected denial" in r.getMessage() for r in caplog.records)
+        assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_unexpected_exception_still_logs_error(self, mock_get, caplog):
+        mock_get.side_effect = RuntimeError("boom")
+
+        from tools.file_tools import write_file_tool
+        with caplog.at_level(logging.ERROR, logger="tools.file_tools"):
+            result = json.loads(write_file_tool("/tmp/out.txt", "data"))
+        assert result["error"] == "boom"
+        assert any("write_file error" in r.getMessage() for r in caplog.records)
 
 
 class TestPatchHandler:
@@ -239,6 +255,11 @@ class TestPatchHints:
 
 class TestSearchHints:
     """Search tool should hint when results are truncated."""
+
+    def setup_method(self):
+        """Clear read/search tracker between tests to avoid cross-test state."""
+        from tools.file_tools import clear_read_tracker
+        clear_read_tracker()
 
     @patch("tools.file_tools._get_file_ops")
     def test_truncated_results_hint(self, mock_get):
