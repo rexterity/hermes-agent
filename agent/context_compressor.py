@@ -91,13 +91,55 @@ class ContextCompressor:
             "compression_count": self.compression_count,
         }
 
+    @staticmethod
+    def _build_fallback_summary(turns_to_summarize: List[Dict[str, Any]]) -> str:
+        """Build a minimal fallback summary from raw turns when LLM summary fails.
+
+        Extracts tool call names and short content snippets so the agent
+        retains some awareness of what happened in the dropped turns, rather
+        than losing all context and reverting to stale MEMORY.md state.
+        """
+        actions: List[str] = []
+        user_requests: List[str] = []
+        for msg in turns_to_summarize:
+            role = msg.get("role", "")
+            content = (msg.get("content") or "").strip()
+            tool_calls = msg.get("tool_calls", [])
+            if role == "user" and content:
+                # Capture first line of user messages as key requests
+                first_line = content.split("\n")[0][:120]
+                user_requests.append(first_line)
+            if tool_calls:
+                names = [tc.get("function", {}).get("name", "?") for tc in tool_calls if isinstance(tc, dict)]
+                if names:
+                    actions.append(", ".join(names))
+            if role == "tool" and content:
+                # Note errors from tool results
+                if "error" in content[:80].lower():
+                    snippet = content[:100].replace("\n", " ")
+                    actions.append(f"[error: {snippet}]")
+
+        parts = []
+        if user_requests:
+            parts.append("User requests: " + " | ".join(user_requests[:8]))
+        if actions:
+            parts.append("Tool actions: " + " → ".join(actions[:15]))
+        if not parts:
+            parts.append(f"{len(turns_to_summarize)} conversation turns were compacted.")
+
+        return (
+            "[WARNING: LLM-generated summary failed. This is a best-effort "
+            "extraction from the dropped turns. The current session state "
+            "(files, terminal, etc.) still reflects earlier work.]\n\n"
+            + "\n".join(parts)
+        )
+
     def _generate_summary(self, turns_to_summarize: List[Dict[str, Any]]) -> Optional[str]:
         """Generate a concise summary of conversation turns.
 
-        Tries the auxiliary model first, then falls back to the user's main
-        model.  Returns None if all attempts fail — the caller should drop
-        the middle turns without a summary rather than inject a useless
-        placeholder.
+        Tries the auxiliary model first, then falls back to a mechanical
+        extraction of tool names and user requests from the raw turns so
+        context is never completely lost.
         """
         parts = []
         for msg in turns_to_summarize:
@@ -150,11 +192,16 @@ Write only the summary body. Do not include any preamble or prefix; the system w
             return self._with_summary_prefix(summary)
         except RuntimeError:
             logging.warning("Context compression: no provider available for "
-                            "summary. Middle turns will be dropped without summary.")
-            return None
+                            "summary. Building fallback summary from raw turns.")
+            return self._with_summary_prefix(
+                self._build_fallback_summary(turns_to_summarize)
+            )
         except Exception as e:
-            logging.warning("Failed to generate context summary: %s", e)
-            return None
+            logging.warning("Failed to generate context summary: %s. "
+                            "Building fallback summary from raw turns.", e)
+            return self._with_summary_prefix(
+                self._build_fallback_summary(turns_to_summarize)
+            )
 
     @staticmethod
     def _with_summary_prefix(summary: str) -> str:
@@ -352,8 +399,14 @@ Write only the summary body. Do not include any preamble or prefix; the system w
             if not _merge_summary_into_tail:
                 compressed.append({"role": summary_role, "content": summary})
         else:
+            # This branch should not be reached now that _generate_summary
+            # returns a fallback summary on failure, but guard defensively.
             if not self.quiet_mode:
-                logger.warning("No summary model available — middle turns dropped without summary")
+                logger.warning("No summary generated — inserting minimal context marker")
+            fallback = self._with_summary_prefix(
+                self._build_fallback_summary(turns_to_summarize)
+            )
+            compressed.append({"role": "user", "content": fallback})
 
         for i in range(compress_end, n_messages):
             msg = messages[i].copy()
