@@ -598,16 +598,38 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             "api_mode": None,
         }
 
-    # Provider is configured — resolve full credentials
+    # Provider is configured — resolve full credentials.
+    # For openai-codex, try the auxiliary client's token reader as a fallback
+    # since the runtime provider system may not have the Codex OAuth token
+    # registered when the main agent runs on a different provider (e.g. Anthropic).
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
         runtime = resolve_runtime_provider(requested=configured_provider)
     except Exception as exc:
+        # Fallback for openai-codex: read the OAuth token directly from
+        # the Hermes auth store, bypassing the runtime provider system.
+        if configured_provider in ("openai-codex", "codex"):
+            try:
+                from agent.auxiliary_client import _read_codex_access_token, _CODEX_AUX_BASE_URL
+                codex_token = _read_codex_access_token()
+                if codex_token:
+                    logger.info("Delegation: resolved openai-codex via direct OAuth token fallback")
+                    return {
+                        "model": configured_model,
+                        "provider": "openai-codex",
+                        "base_url": _CODEX_AUX_BASE_URL,
+                        "api_key": codex_token,
+                        "api_mode": "codex_responses",
+                    }
+            except Exception as inner_exc:
+                logger.debug("Codex direct token fallback also failed: %s", inner_exc)
+
         raise ValueError(
             f"Cannot resolve delegation provider '{configured_provider}': {exc}. "
             f"Check that the provider is configured (API key set, valid provider name), "
             f"or set delegation.base_url/delegation.api_key for a direct endpoint. "
-            f"Available providers: openrouter, nous, zai, kimi-coding, minimax."
+            f"Available providers: openrouter, nous, openai-codex, anthropic, "
+            f"zai, kimi-coding, minimax."
         ) from exc
 
     api_key = runtime.get("api_key", "")
