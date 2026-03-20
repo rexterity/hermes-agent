@@ -4117,7 +4117,7 @@ class AIAgent:
         )
 
         # 2. Build new message list (but don't apply yet)
-        last_n = messages[-carry_n:] if carry_n and len(messages) > carry_n else list(messages)
+        last_n = messages[-carry_n:] if carry_n > 0 else []
         new_messages: list = []
         if handoff:
             handoff_text = f"[Handoff summary from previous provider]\n\n{handoff}"
