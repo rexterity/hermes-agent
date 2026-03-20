@@ -245,7 +245,7 @@ server.tool(
   },
   async ({ session_id, limit, after }) => {
     let query = `?first=${limit}`;
-    if (after) query += `&after=${after}`;
+    if (after) query += `&after=${encodeURIComponent(after)}`;
 
     const result = await api(
       "GET",

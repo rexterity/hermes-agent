@@ -150,7 +150,7 @@ server.tool(
   },
   async ({ limit, status_filter }) => {
     let query = `?limit=${limit}`;
-    if (status_filter) query += `&status=${status_filter}`;
+    if (status_filter) query += `&status=${encodeURIComponent(status_filter)}`;
 
     const result = await api("GET", `/tasks${query}`);
     const items = Array.isArray(result)
