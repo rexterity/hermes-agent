@@ -4118,6 +4118,9 @@ class AIAgent:
 
         # 2. Build new message list (but don't apply yet)
         last_n = messages[-carry_n:] if carry_n > 0 else []
+        # Sanitize carried messages BEFORE computing handoff role so that
+        # orphaned tool pairs are removed first (the first message may change).
+        last_n = self.context_compressor._sanitize_tool_pairs(last_n)
         new_messages: list = []
         if handoff:
             handoff_text = f"[Handoff summary from previous provider]\n\n{handoff}"
@@ -4195,9 +4198,8 @@ class AIAgent:
             )
 
         # 4. Replace messages in-place ONLY after credentials are switched
-        # Sanitize tool_call/tool_result pairs so carried messages don't
-        # contain orphaned references that the API would reject.
-        new_messages = self.context_compressor._sanitize_tool_pairs(new_messages)
+        # (Tool-pair sanitization was already applied to last_n above,
+        # before computing the handoff summary role.)
         messages.clear()
         messages.extend(new_messages)
 
