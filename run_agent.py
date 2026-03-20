@@ -4132,19 +4132,32 @@ class AIAgent:
             else:
                 new_api_mode = "chat_completions"
 
-            # Refresh auth credentials for the target provider (fallible)
-            auth_status = get_auth_status(target_provider)
-            if auth_status.get("logged_in"):
-                if target_provider == "openai-codex":
-                    self._try_refresh_codex_client_credentials(force=True)
-                elif target_provider == "anthropic":
-                    self._try_refresh_anthropic_client_credentials()
-
-            # All fallible operations succeeded — now commit state changes
+            # Set provider/api_mode BEFORE credential refresh so the
+            # refresh methods' guard checks (e.g. self.api_mode !=
+            # "codex_responses") pass for the target provider.
+            saved_provider = self.provider
+            saved_api_mode = self.api_mode
             self.provider = target_provider
+            self.api_mode = new_api_mode
+
+            # Refresh auth credentials for the target provider (fallible)
+            try:
+                auth_status = get_auth_status(target_provider)
+                if auth_status.get("logged_in"):
+                    if target_provider == "openai-codex":
+                        self._try_refresh_codex_client_credentials(force=True)
+                    elif target_provider == "anthropic":
+                        self._try_refresh_anthropic_client_credentials()
+            except Exception:
+                # Revert provider/api_mode on failure so the agent
+                # remains in a consistent state.
+                self.provider = saved_provider
+                self.api_mode = saved_api_mode
+                raise
+
+            # Commit remaining state changes
             self.model = new_model
             self.base_url = new_base_url
-            self.api_mode = new_api_mode
 
             # Update prompt caching flag
             is_claude = "claude" in self.model.lower()
