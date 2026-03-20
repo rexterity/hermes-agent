@@ -205,6 +205,10 @@ class DualProviderBudgetManager:
         """Record that a swap occurred away from ``from_provider``."""
         self.total_swaps += 1
         self.provider_usage[from_provider]["swaps_from"] += 1
+        # Reset the old provider's context_tokens so it becomes eligible
+        # as a swap target again (its actual context is cleared by the swap).
+        if from_provider in self.budgets:
+            self.budgets[from_provider]["context_tokens"] = 0
 
     # ------------------------------------------------------------------
     # Status helpers
