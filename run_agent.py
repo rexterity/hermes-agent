@@ -875,7 +875,25 @@ class AIAgent:
         self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
-        
+
+        # Dual-provider budget manager (initialised lazily when config enables it)
+        self._dual_provider_mgr = None  # type: ignore[assignment]
+        try:
+            from agent.dual_provider import load_dual_provider_config, DualProviderBudgetManager
+            dp_cfg = load_dual_provider_config()
+            if dp_cfg["enabled"]:
+                self._dual_provider_mgr = DualProviderBudgetManager(
+                    provider_order=dp_cfg["providers"],
+                    swap_threshold=dp_cfg["swap_threshold"],
+                    carry_last_n_messages=dp_cfg["carry_last_n_messages"],
+                )
+                # Mark current provider as authenticated
+                ctx_len = self.context_compressor.context_length
+                self._dual_provider_mgr.mark_authenticated(self.provider, ctx_len)
+                self._dual_provider_mgr.update_context_length(self.provider, ctx_len)
+        except Exception:
+            self._dual_provider_mgr = None
+
         if not self.quiet_mode:
             if compression_enabled:
                 print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (compress at {int(compression_threshold*100)}% = {self.context_compressor.threshold_tokens:,})")
@@ -4057,6 +4075,101 @@ class AIAgent:
 
         return compressed, new_system_prompt
 
+    def _perform_dual_provider_swap(
+        self,
+        target_provider: str,
+        messages: list,
+        system_message: str,
+        task_id: str,
+    ) -> None:
+        """Hot-swap the active provider to *target_provider*.
+
+        1. Generate a handoff summary via ContextCompressor
+        2. Build a fresh message list: system prompt + handoff + last N messages
+        3. Switch self.provider / self.api_mode / self.model / credentials
+        4. Reset the context compressor for the new provider's limits
+        """
+        from hermes_cli.auth import get_auth_status, PROVIDER_REGISTRY
+
+        mgr = self._dual_provider_mgr
+        carry_n = mgr.carry_last_n_messages if mgr else 4
+        old_provider = self.provider
+
+        # 1. Generate handoff summary
+        handoff = self.context_compressor.generate_handoff_summary(
+            messages,
+            from_provider=old_provider,
+            to_provider=target_provider,
+        )
+
+        # 2. Build new message list
+        last_n = messages[-carry_n:] if carry_n and len(messages) > carry_n else list(messages)
+        new_messages: list = []
+        if handoff:
+            new_messages.append({
+                "role": "user",
+                "content": f"[Handoff summary from previous provider]\n\n{handoff}",
+            })
+        new_messages.extend(last_n)
+
+        # Replace messages in-place so the caller's reference is updated
+        messages.clear()
+        messages.extend(new_messages)
+
+        # 3. Switch provider credentials
+        pconfig = PROVIDER_REGISTRY.get(target_provider)
+        if pconfig:
+            self.provider = target_provider
+            self.model = pconfig.default_model
+            self.base_url = pconfig.base_url
+
+            # Determine API mode
+            if target_provider == "openai-codex":
+                self.api_mode = "codex_responses"
+            elif target_provider == "anthropic":
+                self.api_mode = "anthropic_messages"
+            else:
+                self.api_mode = "chat_completions"
+
+            # Refresh auth credentials for the target provider
+            auth_status = get_auth_status(target_provider)
+            if auth_status.get("logged_in"):
+                if target_provider == "openai-codex":
+                    self._try_refresh_codex_client_credentials(force=True)
+                elif target_provider == "anthropic":
+                    self._try_refresh_anthropic_client_credentials(force=True)
+
+            # Update prompt caching flag
+            is_claude = "claude" in self.model.lower()
+            is_native_anthropic = self.api_mode == "anthropic_messages"
+            self._use_prompt_caching = is_native_anthropic or (
+                "openrouter" in self.base_url.lower() and is_claude
+            )
+
+        # 4. Reset context compressor for new provider's limits
+        from agent.dual_provider import DEFAULT_CONTEXT_LENGTHS
+        new_ctx_len = DEFAULT_CONTEXT_LENGTHS.get(target_provider, 200_000)
+        self.context_compressor.context_length = new_ctx_len
+        self.context_compressor.threshold_tokens = int(
+            new_ctx_len * self.context_compressor.threshold_percent
+        )
+        self.context_compressor.last_prompt_tokens = 0
+        self.context_compressor.last_completion_tokens = 0
+
+        # Invalidate cached system prompt so it's rebuilt on next iteration
+        self._invalidate_system_prompt()
+
+        # Record the swap
+        if mgr:
+            mgr.record_swap(old_provider)
+            mgr.update_context_length(target_provider, new_ctx_len)
+
+        self._vprint(
+            f"{self.log_prefix}🔄 Dual-provider swap: {old_provider} → {target_provider} "
+            f"(model: {self.model})",
+            force=True,
+        )
+
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute tool calls from the assistant message and append results to messages.
 
@@ -5452,6 +5565,19 @@ class AIAgent:
                         self.session_cache_write_tokens += canonical_usage.cache_write_tokens
                         self.session_reasoning_tokens += canonical_usage.reasoning_tokens
 
+                        # Record per-provider usage for dual-provider budget tracking
+                        if self._dual_provider_mgr is not None:
+                            self._dual_provider_mgr.record_usage(
+                                self.provider,
+                                input_tokens=canonical_usage.input_tokens,
+                                output_tokens=canonical_usage.output_tokens,
+                                cache_read_tokens=canonical_usage.cache_read_tokens,
+                                cache_write_tokens=canonical_usage.cache_write_tokens,
+                                reasoning_tokens=canonical_usage.reasoning_tokens,
+                                prompt_tokens=prompt_tokens,
+                                estimated_cost_usd=0.0,  # updated below after cost estimation
+                            )
+
                         cost_result = estimate_usage_cost(
                             self.model,
                             canonical_usage,
@@ -6205,6 +6331,30 @@ class AIAgent:
                             task_id=effective_task_id,
                         )
                     
+                    # ── Dual-provider swap check ──────────────────
+                    # After tool execution completes, check if the active
+                    # provider's context is approaching its limit and swap
+                    # to the standby provider if available.
+                    if self._dual_provider_mgr is not None:
+                        _swap_target = self._dual_provider_mgr.check_and_swap(
+                            self.provider, _estimated_next_prompt,
+                        )
+                        if _swap_target is not None:
+                            try:
+                                self._perform_dual_provider_swap(
+                                    _swap_target, messages, system_message,
+                                    effective_task_id,
+                                )
+                                # After swap, messages have been replaced with
+                                # handoff summary + last N; active_system_prompt
+                                # stays the same.
+                                active_system_prompt = system_message
+                            except Exception as _swap_err:
+                                logger.warning(
+                                    "Dual-provider swap to %s failed: %s",
+                                    _swap_target, _swap_err,
+                                )
+
                     # Save session log incrementally (so progress is visible even if interrupted)
                     self._session_messages = messages
                     self._save_session_log(messages)

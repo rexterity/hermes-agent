@@ -119,6 +119,96 @@ class TestCLIStatusBar:
         assert "claude-sonnet-4-20250514" in text
 
 
+class TestCLIDualProviderStatusBar:
+    """Tests for dual-provider indicator rendering in the status bar."""
+
+    def _make_cli_with_dual_provider(self):
+        from agent.dual_provider import DualProviderBudgetManager
+
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=10_000,
+            completion_tokens=2_000,
+            total_tokens=12_000,
+            api_calls=5,
+            context_tokens=148_000,
+            context_length=200_000,
+        )
+        mgr = DualProviderBudgetManager(
+            provider_order=["anthropic", "openai-codex"],
+            swap_threshold=0.85,
+        )
+        mgr.mark_authenticated("anthropic", 200_000)
+        mgr.mark_authenticated("openai-codex", 192_000)
+        mgr.record_usage("anthropic", input_tokens=100_000, output_tokens=48_000, prompt_tokens=148_000)
+        mgr.record_usage("openai-codex", input_tokens=10_000, output_tokens=2_000, prompt_tokens=12_000)
+        cli_obj.agent._dual_provider_mgr = mgr
+        cli_obj.agent.provider = "anthropic"
+        return cli_obj
+
+    def test_snapshot_includes_provider_usage(self):
+        cli_obj = self._make_cli_with_dual_provider()
+        snapshot = cli_obj._get_status_bar_snapshot()
+        assert "provider_usage" in snapshot
+        assert "anthropic" in snapshot["provider_usage"]
+        assert "openai-codex" in snapshot["provider_usage"]
+        assert snapshot["active_provider"] == "anthropic"
+        assert snapshot["provider_usage"]["anthropic"]["is_active"] is True
+        assert snapshot["provider_usage"]["openai-codex"]["is_active"] is False
+
+    def test_snapshot_provider_total_tokens(self):
+        cli_obj = self._make_cli_with_dual_provider()
+        snapshot = cli_obj._get_status_bar_snapshot()
+        assert snapshot["provider_usage"]["anthropic"]["total_tokens"] == 148_000
+        assert snapshot["provider_usage"]["openai-codex"]["total_tokens"] == 12_000
+
+    def test_fragments_include_provider_indicators_wide(self):
+        cli_obj = self._make_cli_with_dual_provider()
+        import os, shutil
+        original = shutil.get_terminal_size
+        shutil.get_terminal_size = lambda *a, **k: os.terminal_size((120, 24))
+        try:
+            frags = cli_obj._get_status_bar_fragments()
+        finally:
+            shutil.get_terminal_size = original
+
+        text = "".join(t for _, t in frags)
+        # Should contain provider labels with indicators
+        assert "A:" in text
+        assert "C:" in text
+        assert "\u25cf" in text  # active indicator
+        assert "\u25cb" in text  # standby indicator
+
+    def test_fragments_include_provider_indicators_narrow(self):
+        cli_obj = self._make_cli_with_dual_provider()
+        import os, shutil
+        original = shutil.get_terminal_size
+        shutil.get_terminal_size = lambda *a, **k: os.terminal_size((90, 24))
+        try:
+            frags = cli_obj._get_status_bar_fragments()
+        finally:
+            shutil.get_terminal_size = original
+
+        text = "".join(t for _, t in frags)
+        # Narrow format: no spaces around colon/indicator
+        assert "A:" in text
+        assert "C:" in text
+
+    def test_snapshot_empty_when_no_dual_provider(self):
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=10_000,
+            completion_tokens=2_000,
+            total_tokens=12_000,
+            api_calls=5,
+            context_tokens=10_000,
+            context_length=200_000,
+        )
+        snapshot = cli_obj._get_status_bar_snapshot()
+        assert snapshot["provider_usage"] == {}
+        assert snapshot["active_provider"] is None
+
+
 class TestCLIUsageReport:
     def test_show_usage_includes_estimated_cost(self, capsys):
         cli_obj = _attach_agent(
