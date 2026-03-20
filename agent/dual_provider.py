@@ -209,6 +209,7 @@ class DualProviderBudgetManager:
         # as a swap target again (its actual context is cleared by the swap).
         if from_provider in self.budgets:
             self.budgets[from_provider]["context_tokens"] = 0
+        self.provider_usage[from_provider]["context_tokens"] = 0
 
     # ------------------------------------------------------------------
     # Status helpers

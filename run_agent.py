@@ -4120,10 +4120,15 @@ class AIAgent:
         last_n = messages[-carry_n:] if carry_n and len(messages) > carry_n else list(messages)
         new_messages: list = []
         if handoff:
-            new_messages.append({
-                "role": "user",
-                "content": f"[Handoff summary from previous provider]\n\n{handoff}",
-            })
+            handoff_text = f"[Handoff summary from previous provider]\n\n{handoff}"
+            # Pick a role that avoids consecutive same-role with the first
+            # carried message (Anthropic requires strict alternation).
+            first_carried_role = last_n[0].get("role", "user") if last_n else "user"
+            if first_carried_role == "user":
+                summary_role = "assistant"
+            else:
+                summary_role = "user"
+            new_messages.append({"role": summary_role, "content": handoff_text})
         new_messages.extend(last_n)
 
         # 3. Switch provider credentials (fallible — do BEFORE mutating messages)
