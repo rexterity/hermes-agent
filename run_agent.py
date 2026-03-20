@@ -4188,7 +4188,17 @@ class AIAgent:
 
             # Commit remaining state changes
             self.model = new_model
-            self.base_url = new_base_url
+            # Only set base_url if the credential refresh didn't already
+            # resolve a more specific URL (e.g. from HERMES_CODEX_BASE_URL).
+            if target_provider == "openai-codex" and self.base_url != new_base_url:
+                pass  # keep the env-var-resolved URL from _try_refresh_codex_client_credentials
+            else:
+                self.base_url = new_base_url
+
+            # Keep self.api_key in sync so sub-agent delegation and other
+            # consumers that read it get the correct provider key.
+            if target_provider == "anthropic" and hasattr(self, "_anthropic_api_key"):
+                self.api_key = self._anthropic_api_key
 
             # Update prompt caching flag
             is_claude = "claude" in self.model.lower()
