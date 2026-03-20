@@ -879,7 +879,7 @@ class AIAgent:
         # Dual-provider budget manager (initialised lazily when config enables it)
         self._dual_provider_mgr = None  # type: ignore[assignment]
         try:
-            from agent.dual_provider import load_dual_provider_config, DualProviderBudgetManager
+            from agent.dual_provider import load_dual_provider_config, DualProviderBudgetManager, DEFAULT_CONTEXT_LENGTHS
             dp_cfg = load_dual_provider_config()
             if dp_cfg["enabled"]:
                 self._dual_provider_mgr = DualProviderBudgetManager(
@@ -887,9 +887,17 @@ class AIAgent:
                     swap_threshold=dp_cfg["swap_threshold"],
                     carry_last_n_messages=dp_cfg["carry_last_n_messages"],
                 )
-                # Mark current provider as authenticated
+                # Mark ALL authenticated providers (not just the active one)
+                # so check_and_swap can find valid swap targets.
+                from hermes_cli.auth import get_authenticated_providers
+                authenticated_pids = get_authenticated_providers()
+                for pid in dp_cfg["providers"]:
+                    if pid in authenticated_pids:
+                        pid_ctx_len = DEFAULT_CONTEXT_LENGTHS.get(pid, 200_000)
+                        self._dual_provider_mgr.mark_authenticated(pid, pid_ctx_len)
+                        self._dual_provider_mgr.update_context_length(pid, pid_ctx_len)
+                # Override active provider's context length with the probed value
                 ctx_len = self.context_compressor.context_length
-                self._dual_provider_mgr.mark_authenticated(self.provider, ctx_len)
                 self._dual_provider_mgr.update_context_length(self.provider, ctx_len)
         except Exception:
             self._dual_provider_mgr = None
@@ -5598,7 +5606,7 @@ class AIAgent:
                                 cache_write_tokens=canonical_usage.cache_write_tokens,
                                 reasoning_tokens=canonical_usage.reasoning_tokens,
                                 prompt_tokens=prompt_tokens,
-                                estimated_cost_usd=0.0,  # updated below after cost estimation
+                                estimated_cost_usd=0.0,  # cost not tracked per-provider yet
                             )
 
                         cost_result = estimate_usage_cost(
@@ -6347,7 +6355,11 @@ class AIAgent:
                         + _compressor.last_completion_tokens
                         + _new_chars // 3  # conservative: JSON-heavy tool results ≈ 3 chars/token
                     )
-                    if self.compression_enabled and _compressor.should_compress(_estimated_next_prompt):
+                    _compression_fired = (
+                        self.compression_enabled
+                        and _compressor.should_compress(_estimated_next_prompt)
+                    )
+                    if _compression_fired:
                         messages, active_system_prompt = self._compress_context(
                             messages, system_message,
                             approx_tokens=self.context_compressor.last_prompt_tokens,
@@ -6359,8 +6371,17 @@ class AIAgent:
                     # provider's context is approaching its limit and swap
                     # to the standby provider if available.
                     if self._dual_provider_mgr is not None:
+                        # If compression just fired, re-estimate tokens from
+                        # the (now shorter) messages so we don't use the stale
+                        # pre-compression value (which would trigger an
+                        # unnecessary swap + double-summary).
+                        _swap_prompt_estimate = (
+                            estimate_messages_tokens_rough(messages)
+                            if _compression_fired
+                            else _estimated_next_prompt
+                        )
                         _swap_target = self._dual_provider_mgr.check_and_swap(
-                            self.provider, _estimated_next_prompt,
+                            self.provider, _swap_prompt_estimate,
                         )
                         if _swap_target is not None:
                             try:
@@ -6368,10 +6389,11 @@ class AIAgent:
                                     _swap_target, messages, system_message,
                                     effective_task_id,
                                 )
-                                # After swap, messages have been replaced with
-                                # handoff summary + last N; active_system_prompt
-                                # stays the same.
-                                active_system_prompt = system_message
+                                # Rebuild system prompt (same as _compress_context)
+                                # so the full identity/skills/memory layers are
+                                # preserved on the new provider.
+                                active_system_prompt = self._build_system_prompt(system_message)
+                                self._cached_system_prompt = active_system_prompt
                             except Exception as _swap_err:
                                 logger.warning(
                                     "Dual-provider swap to %s failed: %s",
