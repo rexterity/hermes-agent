@@ -260,6 +260,11 @@ def _run_single_child(
     """
     child_start = time.monotonic()
 
+    # Save the parent's tool names before the child overwrites the
+    # process-global so we can restore them in the finally block.
+    import model_tools
+    _saved_tool_names = list(model_tools._last_resolved_tool_names)
+
     # Get the progress callback from the child agent
     child_progress_cb = getattr(child, 'tool_progress_callback', None)
 
