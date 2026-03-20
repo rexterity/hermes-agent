@@ -4136,6 +4136,9 @@ class AIAgent:
 
         # 3. Switch provider credentials (fallible — do BEFORE mutating messages)
         pconfig = PROVIDER_REGISTRY.get(target_provider)
+        if not pconfig:
+            raise RuntimeError(f"Cannot swap to {target_provider}: not in PROVIDER_REGISTRY")
+
         if pconfig:
             new_model = DEFAULT_MODELS.get(target_provider, self.model)
             new_base_url = pconfig.inference_base_url or self.base_url
@@ -4154,6 +4157,7 @@ class AIAgent:
             saved_provider = self.provider
             saved_api_mode = self.api_mode
             saved_base_url = self.base_url
+            saved_api_key = self.api_key
             self.provider = target_provider
             self.api_mode = new_api_mode
 
@@ -4167,8 +4171,21 @@ class AIAgent:
                         self._try_refresh_anthropic_client_credentials()
 
                 # Verify the target provider's client was actually built.
-                # The refresh methods return False (without raising) when
-                # the prerequisite attributes (e.g. _anthropic_api_key)
+                # Codex: the refresh sets self.api_key; if it's unchanged
+                # the refresh silently failed — try a direct credential resolve.
+                if target_provider == "openai-codex" and self.api_key == saved_api_key:
+                    from hermes_cli.auth import resolve_codex_runtime_credentials
+                    creds = resolve_codex_runtime_credentials(force_refresh=True)
+                    codex_key = creds.get("api_key", "")
+                    if not codex_key:
+                        raise RuntimeError("Cannot swap to openai-codex: no credentials available")
+                    self.api_key = codex_key.strip()
+                    codex_url = creds.get("base_url", "")
+                    if codex_url:
+                        self.base_url = codex_url.strip().rstrip("/")
+
+                # Anthropic: The refresh methods return False (without raising)
+                # when the prerequisite attributes (e.g. _anthropic_api_key)
                 # were never set — so we must check explicitly.
                 if target_provider == "anthropic" and self._anthropic_client is None:
                     from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
@@ -4186,6 +4203,7 @@ class AIAgent:
                 self.provider = saved_provider
                 self.api_mode = saved_api_mode
                 self.base_url = saved_base_url
+                self.api_key = saved_api_key
                 raise
 
             # Commit remaining state changes
