@@ -4124,14 +4124,24 @@ class AIAgent:
         new_messages: list = []
         if handoff:
             handoff_text = f"[Handoff summary from previous provider]\n\n{handoff}"
-            # Pick a role that avoids consecutive same-role with the first
-            # carried message (Anthropic requires strict alternation).
-            first_carried_role = last_n[0].get("role", "user") if last_n else "user"
-            if first_carried_role == "user":
-                summary_role = "assistant"
+            if not last_n:
+                # No carried messages — summary is the only message.
+                # Must be "user" so Anthropic accepts it as the first message.
+                new_messages.append({"role": "user", "content": handoff_text})
             else:
-                summary_role = "user"
-            new_messages.append({"role": summary_role, "content": handoff_text})
+                first_carried_role = last_n[0].get("role", "user")
+                if first_carried_role == "user":
+                    # Merging the handoff into the first carried message avoids
+                    # an "assistant" summary before a "user" message (which would
+                    # be the first message and violate Anthropic's requirement
+                    # that the first non-system message is "user").
+                    first_msg = last_n[0]
+                    original = first_msg.get("content", "")
+                    first_msg["content"] = f"{handoff_text}\n\n{original}"
+                else:
+                    # First carried message is assistant/tool — safe to prepend
+                    # a "user" summary before it.
+                    new_messages.append({"role": "user", "content": handoff_text})
         new_messages.extend(last_n)
 
         # 3. Switch provider credentials (fallible — do BEFORE mutating messages)
