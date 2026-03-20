@@ -4153,6 +4153,7 @@ class AIAgent:
             # "codex_responses") pass for the target provider.
             saved_provider = self.provider
             saved_api_mode = self.api_mode
+            saved_base_url = self.base_url
             self.provider = target_provider
             self.api_mode = new_api_mode
 
@@ -4184,14 +4185,17 @@ class AIAgent:
                 # remains in a consistent state.
                 self.provider = saved_provider
                 self.api_mode = saved_api_mode
+                self.base_url = saved_base_url
                 raise
 
             # Commit remaining state changes
             self.model = new_model
             # Only set base_url if the credential refresh didn't already
             # resolve a more specific URL (e.g. from HERMES_CODEX_BASE_URL).
-            if target_provider == "openai-codex" and self.base_url != new_base_url:
-                pass  # keep the env-var-resolved URL from _try_refresh_codex_client_credentials
+            # Compare against the saved pre-refresh value — if the refresh
+            # changed it, keep the refresh's value; otherwise use the static one.
+            if self.base_url != saved_base_url:
+                pass  # credential refresh already resolved a specific URL
             else:
                 self.base_url = new_base_url
 
