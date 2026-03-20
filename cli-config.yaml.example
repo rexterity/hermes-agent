@@ -631,6 +631,89 @@ toolsets:
 #       max_tool_rounds: 5      # tool loop limit (0 = disable)
 #       log_level: "info"       # audit verbosity
 
+# ---------------------------------------------------------------------------
+# Integration Layer — first-class MCP servers for common services
+# ---------------------------------------------------------------------------
+# These pre-configured servers give the agent direct access to GitHub, Linear,
+# Notion, Google Workspace, Devin, and Jules via MCP. Uncomment the ones you
+# want and fill in the credentials.  All tools are auto-discovered.
+#
+# 1. GitHub (official MCP server — zero custom code)
+#    Tools: create_issue, create_pull_request, search_repositories,
+#           get_file_contents, push_files, list_commits, create_branch, ...
+#    Replaces: manual `gh` CLI calls via terminal.
+#
+#   github:
+#     command: "npx"
+#     args: ["-y", "@modelcontextprotocol/server-github"]
+#     env:
+#       GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}"
+#     timeout: 120
+#
+# 2. Linear (community MCP server — zero custom code)
+#    Tools: create_issue, update_issue, search_issues, list_projects,
+#           create_comment, assign_issue, manage_cycles, ...
+#    Replaces: manual GraphQL curl calls via skill.
+#
+#   linear:
+#     command: "npx"
+#     args: ["-y", "@mseep/linear-mcp"]
+#     env:
+#       LINEAR_API_KEY: "${LINEAR_API_KEY}"
+#     timeout: 120
+#
+# 3. Notion (community MCP server — zero custom code)
+#    Tools: search, create_page, update_page, query_database,
+#           create_database, append_blocks, ...
+#    Requires: Notion integration token (https://notion.so/my-integrations)
+#
+#   notion:
+#     command: "npx"
+#     args: ["-y", "@mieubrisse/notion-mcp-server"]
+#     env:
+#       NOTION_API_KEY: "${NOTION_API_KEY}"
+#     timeout: 120
+#
+# 4. Google Workspace (community MCP server)
+#    Tools: send_email, search_email, create_event, list_events,
+#           upload_to_drive, search_drive, create_doc, create_sheet, ...
+#    Note: evaluate against existing gws-auth-env CLI before enabling.
+#          The MCP server needs the same OAuth credentials.
+#
+#   google:
+#     command: "npx"
+#     args: ["-y", "@presto-ai/google-workspace-mcp"]
+#     env:
+#       GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID}"
+#       GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET}"
+#       GOOGLE_REFRESH_TOKEN: "${GOOGLE_REFRESH_TOKEN}"
+#     timeout: 120
+#
+# 5. Devin (custom MCP bridge — wraps Devin REST API via stdio)
+#    Tools: devin_create_session, devin_get_session, devin_send_message,
+#           devin_list_sessions, devin_get_session_events
+#    Install deps: cd mcp-bridges/devin-mcp && npm install
+#
+#   devin:
+#     command: "node"
+#     args: ["mcp-bridges/devin-mcp/index.js"]
+#     env:
+#       DEVIN_API_KEY: "${DEVIN_API_KEY}"
+#       DEVIN_ORG_ID: "${DEVIN_ORG_ID}"
+#     timeout: 300
+#
+# 6. Jules (custom MCP bridge — wraps Jules API via stdio)
+#    Tools: jules_create_task, jules_get_task, jules_list_tasks,
+#           jules_approve_plan
+#    Install deps: cd mcp-bridges/jules-mcp && npm install
+#
+#   jules:
+#     command: "node"
+#     args: ["mcp-bridges/jules-mcp/index.js"]
+#     env:
+#       JULES_API_KEY: "${JULES_API_KEY}"
+#     timeout: 300
+
 # =============================================================================
 # Voice Transcription (Speech-to-Text)
 # =============================================================================

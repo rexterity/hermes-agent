@@ -1,0 +1,17 @@
+{
+  "name": "@hermes/devin-mcp",
+  "version": "1.0.0",
+  "description": "MCP stdio bridge for Devin REST API — exposes Devin session management as MCP tools",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
