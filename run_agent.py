@@ -4085,11 +4085,17 @@ class AIAgent:
         """Hot-swap the active provider to *target_provider*.
 
         1. Generate a handoff summary via ContextCompressor
-        2. Build a fresh message list: system prompt + handoff + last N messages
-        3. Switch self.provider / self.api_mode / self.model / credentials
+        2. Validate and switch provider credentials (fallible)
+        3. Only then replace messages in-place (non-fallible)
         4. Reset the context compressor for the new provider's limits
+
+        The destructive mutation of the messages list is deferred until
+        after all fallible operations (credential lookup, client refresh)
+        succeed, so a failure mid-swap does not leave the agent in a
+        corrupted state.
         """
         from hermes_cli.auth import get_auth_status, PROVIDER_REGISTRY
+        from agent.dual_provider import DEFAULT_CONTEXT_LENGTHS, DEFAULT_MODELS
 
         mgr = self._dual_provider_mgr
         carry_n = mgr.carry_last_n_messages if mgr else 4
@@ -4102,7 +4108,7 @@ class AIAgent:
             to_provider=target_provider,
         )
 
-        # 2. Build new message list
+        # 2. Build new message list (but don't apply yet)
         last_n = messages[-carry_n:] if carry_n and len(messages) > carry_n else list(messages)
         new_messages: list = []
         if handoff:
@@ -4112,32 +4118,33 @@ class AIAgent:
             })
         new_messages.extend(last_n)
 
-        # Replace messages in-place so the caller's reference is updated
-        messages.clear()
-        messages.extend(new_messages)
-
-        # 3. Switch provider credentials
+        # 3. Switch provider credentials (fallible — do BEFORE mutating messages)
         pconfig = PROVIDER_REGISTRY.get(target_provider)
         if pconfig:
-            self.provider = target_provider
-            self.model = pconfig.default_model
-            self.base_url = pconfig.base_url
+            new_model = DEFAULT_MODELS.get(target_provider, self.model)
+            new_base_url = pconfig.inference_base_url or self.base_url
 
             # Determine API mode
             if target_provider == "openai-codex":
-                self.api_mode = "codex_responses"
+                new_api_mode = "codex_responses"
             elif target_provider == "anthropic":
-                self.api_mode = "anthropic_messages"
+                new_api_mode = "anthropic_messages"
             else:
-                self.api_mode = "chat_completions"
+                new_api_mode = "chat_completions"
 
-            # Refresh auth credentials for the target provider
+            # Refresh auth credentials for the target provider (fallible)
             auth_status = get_auth_status(target_provider)
             if auth_status.get("logged_in"):
                 if target_provider == "openai-codex":
                     self._try_refresh_codex_client_credentials(force=True)
                 elif target_provider == "anthropic":
-                    self._try_refresh_anthropic_client_credentials(force=True)
+                    self._try_refresh_anthropic_client_credentials()
+
+            # All fallible operations succeeded — now commit state changes
+            self.provider = target_provider
+            self.model = new_model
+            self.base_url = new_base_url
+            self.api_mode = new_api_mode
 
             # Update prompt caching flag
             is_claude = "claude" in self.model.lower()
@@ -4146,8 +4153,11 @@ class AIAgent:
                 "openrouter" in self.base_url.lower() and is_claude
             )
 
-        # 4. Reset context compressor for new provider's limits
-        from agent.dual_provider import DEFAULT_CONTEXT_LENGTHS
+        # 4. Replace messages in-place ONLY after credentials are switched
+        messages.clear()
+        messages.extend(new_messages)
+
+        # 5. Reset context compressor for new provider's limits
         new_ctx_len = DEFAULT_CONTEXT_LENGTHS.get(target_provider, 200_000)
         self.context_compressor.context_length = new_ctx_len
         self.context_compressor.threshold_tokens = int(

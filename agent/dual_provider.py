@@ -36,6 +36,12 @@ DEFAULT_CONTEXT_LENGTHS: Dict[str, int] = {
     "openai-codex": 192_000,
 }
 
+# Default models per provider (used during swap when ProviderConfig lacks a model field)
+DEFAULT_MODELS: Dict[str, str] = {
+    "anthropic": "claude-sonnet-4-20250514",
+    "openai-codex": "codex-mini-latest",
+}
+
 
 def _make_provider_usage() -> Dict[str, Any]:
     """Factory for per-provider cumulative token counters."""
