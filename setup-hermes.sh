@@ -252,6 +252,24 @@ if [ -n "$SHELL_CONFIG" ]; then
 fi
 
 # ============================================================================
+# MCP Bridges (Devin + Jules custom MCP servers)
+# ============================================================================
+
+echo -e "${CYAN}→${NC} Installing MCP bridge dependencies..."
+
+if command -v npm &> /dev/null || command -v npx &> /dev/null; then
+    for bridge in devin-mcp jules-mcp; do
+        if [ -d "$SCRIPT_DIR/mcp-bridges/$bridge" ] && [ -f "$SCRIPT_DIR/mcp-bridges/$bridge/package.json" ]; then
+            (cd "$SCRIPT_DIR/mcp-bridges/$bridge" && npm install --no-audit --no-fund 2>/dev/null) && \
+                echo -e "${GREEN}✓${NC} $bridge dependencies installed" || \
+                echo -e "${YELLOW}⚠${NC} $bridge install failed (MCP bridge may not work)"
+        fi
+    done
+else
+    echo -e "${YELLOW}⚠${NC} npm not found — skipping MCP bridge deps (Devin/Jules bridges need Node.js)"
+fi
+
+# ============================================================================
 # Seed bundled skills into ~/.hermes/skills/
 # ============================================================================
 
