@@ -4156,6 +4156,21 @@ class AIAgent:
                         self._try_refresh_codex_client_credentials(force=True)
                     elif target_provider == "anthropic":
                         self._try_refresh_anthropic_client_credentials()
+
+                # Verify the target provider's client was actually built.
+                # The refresh methods return False (without raising) when
+                # the prerequisite attributes (e.g. _anthropic_api_key)
+                # were never set — so we must check explicitly.
+                if target_provider == "anthropic" and self._anthropic_client is None:
+                    from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
+                    effective_key = resolve_anthropic_token() or ""
+                    if not effective_key:
+                        raise RuntimeError("Cannot swap to anthropic: no API key available")
+                    self._anthropic_api_key = effective_key
+                    self._anthropic_base_url = new_base_url
+                    from agent.anthropic_adapter import _is_oauth_token as _is_oat
+                    self._is_anthropic_oauth = _is_oat(effective_key)
+                    self._anthropic_client = build_anthropic_client(effective_key, new_base_url)
             except Exception:
                 # Revert provider/api_mode on failure so the agent
                 # remains in a consistent state.
@@ -4175,6 +4190,9 @@ class AIAgent:
             )
 
         # 4. Replace messages in-place ONLY after credentials are switched
+        # Sanitize tool_call/tool_result pairs so carried messages don't
+        # contain orphaned references that the API would reject.
+        new_messages = self.context_compressor._sanitize_tool_pairs(new_messages)
         messages.clear()
         messages.extend(new_messages)
 
