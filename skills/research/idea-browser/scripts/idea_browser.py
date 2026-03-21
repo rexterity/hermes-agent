@@ -577,10 +577,14 @@ def polymarket_trending(limit: int = 10) -> dict:
 
 # ─── Demand Scorer ────────────────────────────────────────────────────────────
 
-def _score_google(keyword: str, geo: str = "") -> dict:
-    """Score a keyword based on Google Trends data (0-100)."""
+def _score_google(keyword: str, geo: str = "", *, prefetched: dict | None = None) -> dict:
+    """Score a keyword based on Google Trends data (0-100).
+
+    If *prefetched* is provided it must be the dict returned by
+    ``google_trends_interest``; the network call is skipped.
+    """
     try:
-        interest = google_trends_interest(keyword, geo)
+        interest = prefetched if prefetched is not None else google_trends_interest(keyword, geo)
         if "error" in interest:
             return {"score": 0, "reason": interest["error"], "weight": 0.35}
 
@@ -607,10 +611,14 @@ def _score_google(keyword: str, geo: str = "") -> dict:
         return {"score": 0, "reason": str(e), "weight": 0.35}
 
 
-def _score_reddit(keyword: str) -> dict:
-    """Score a keyword based on Reddit engagement signals (0-100)."""
+def _score_reddit(keyword: str, *, prefetched: dict | None = None) -> dict:
+    """Score a keyword based on Reddit engagement signals (0-100).
+
+    If *prefetched* is provided it must be the dict returned by
+    ``reddit_search_subreddits``; the network call is skipped.
+    """
     try:
-        sr_data = reddit_search_subreddits(keyword, limit=5)
+        sr_data = prefetched if prefetched is not None else reddit_search_subreddits(keyword, limit=5)
         if "error" in sr_data:
             return {"score": 0, "reason": sr_data["error"], "weight": 0.25}
 
@@ -645,10 +653,14 @@ def _score_reddit(keyword: str) -> dict:
         return {"score": 0, "reason": str(e), "weight": 0.25}
 
 
-def _score_tiktok(keyword: str) -> dict:
-    """Score based on TikTok trending hashtags related to the keyword (0-100)."""
+def _score_tiktok(keyword: str, *, prefetched: dict | None = None) -> dict:
+    """Score based on TikTok trending hashtags related to the keyword (0-100).
+
+    If *prefetched* is provided it must be the dict returned by
+    ``tiktok_trending_hashtags``; the network call is skipped.
+    """
     try:
-        hashtags = tiktok_trending_hashtags(region="US", period=7, limit=50)
+        hashtags = prefetched if prefetched is not None else tiktok_trending_hashtags(region="US", period=7, limit=50)
         if "error" in hashtags:
             return {"score": 0, "reason": hashtags["error"], "weight": 0.20}
 
@@ -691,10 +703,14 @@ def _score_tiktok(keyword: str) -> dict:
         return {"score": 0, "reason": str(e), "weight": 0.20}
 
 
-def _score_polymarket(keyword: str) -> dict:
-    """Score based on Polymarket prediction market interest (0-100)."""
+def _score_polymarket(keyword: str, *, prefetched: dict | None = None) -> dict:
+    """Score based on Polymarket prediction market interest (0-100).
+
+    If *prefetched* is provided it must be the dict returned by
+    ``polymarket_search``; the network call is skipped.
+    """
     try:
-        pm_data = polymarket_search(keyword)
+        pm_data = prefetched if prefetched is not None else polymarket_search(keyword)
         if "error" in pm_data:
             return {"score": 0, "reason": pm_data["error"], "weight": 0.20}
 
@@ -724,7 +740,12 @@ def _score_polymarket(keyword: str) -> dict:
         return {"score": 0, "reason": str(e), "weight": 0.20}
 
 
-def demand_score(keyword: str, geo: str = "") -> dict:
+def demand_score(
+    keyword: str,
+    geo: str = "",
+    *,
+    prefetched: dict | None = None,
+) -> dict:
     """Compute a cross-platform demand score (0-100) for a keyword.
 
     Weighted composite:
@@ -732,15 +753,23 @@ def demand_score(keyword: str, geo: str = "") -> dict:
       - Reddit:         25%
       - TikTok:         20%
       - Polymarket:     20%
+
+    If *prefetched* is a dict it may contain any of the keys
+    ``google_trends``, ``reddit``, ``tiktok``, ``polymarket`` mapping to
+    the raw API dicts returned by the corresponding fetch functions.
+    When a key is present the scorer will reuse that data instead of
+    making a new network call.
     """
+    pf = prefetched or {}
+
     # Run all platform scorers in parallel
     results = {}
     with ThreadPoolExecutor(max_workers=4) as ex:
         futures = {
-            ex.submit(_score_google, keyword, geo): "google_trends",
-            ex.submit(_score_reddit, keyword): "reddit",
-            ex.submit(_score_tiktok, keyword): "tiktok",
-            ex.submit(_score_polymarket, keyword): "polymarket",
+            ex.submit(_score_google, keyword, geo, prefetched=pf.get("google_trends")): "google_trends",
+            ex.submit(_score_reddit, keyword, prefetched=pf.get("reddit")): "reddit",
+            ex.submit(_score_tiktok, keyword, prefetched=pf.get("tiktok")): "tiktok",
+            ex.submit(_score_polymarket, keyword, prefetched=pf.get("polymarket")): "polymarket",
         }
         for future in as_completed(futures):
             platform = futures[future]
@@ -783,16 +812,21 @@ def demand_score(keyword: str, geo: str = "") -> dict:
 # ─── Full Scan ────────────────────────────────────────────────────────────────
 
 def full_scan(keyword: str, geo: str = "") -> dict:
-    """Run a comprehensive scan across all platforms for a keyword."""
+    """Run a comprehensive scan across all platforms for a keyword.
+
+    Fetches data once from each platform, then reuses the already-fetched
+    results to compute the demand score — avoiding duplicate API calls.
+    """
     results = {}
 
-    with ThreadPoolExecutor(max_workers=5) as ex:
+    with ThreadPoolExecutor(max_workers=6) as ex:
         futures = {
             ex.submit(google_trends_interest, keyword, geo): "google_trends",
             ex.submit(google_trends_rising, keyword, geo): "google_rising",
             ex.submit(reddit_search_subreddits, keyword, 10): "reddit_subreddits",
             ex.submit(reddit_pain_points, keyword, "", 10): "reddit_pain_points",
             ex.submit(polymarket_search, keyword): "polymarket",
+            ex.submit(tiktok_trending_hashtags, "US", 7, 50): "tiktok_hashtags",
         }
         for future in as_completed(futures):
             key = futures[future]
@@ -801,14 +835,13 @@ def full_scan(keyword: str, geo: str = "") -> dict:
             except Exception as e:
                 results[key] = {"error": str(e)}
 
-    # Also get TikTok trending (not keyword-specific, but provides market context)
-    try:
-        results["tiktok_hashtags"] = tiktok_trending_hashtags("US", 7, 10)
-    except Exception as e:
-        results["tiktok_hashtags"] = {"error": str(e)}
-
-    # Compute demand score
-    score_result = demand_score(keyword, geo)
+    # Compute demand score by reusing already-fetched data
+    score_result = demand_score(keyword, geo, prefetched={
+        "google_trends": results.get("google_trends"),
+        "reddit": results.get("reddit_subreddits"),
+        "tiktok": results.get("tiktok_hashtags"),
+        "polymarket": results.get("polymarket"),
+    })
     results["demand_score"] = score_result
 
     return {
