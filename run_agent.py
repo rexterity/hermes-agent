@@ -4135,7 +4135,8 @@ class AIAgent:
                     # an "assistant" summary before a "user" message (which would
                     # be the first message and violate Anthropic's requirement
                     # that the first non-system message is "user").
-                    first_msg = last_n[0]
+                    first_msg = last_n[0].copy()
+                    last_n[0] = first_msg
                     original = first_msg.get("content", "")
                     first_msg["content"] = f"{handoff_text}\n\n{original}"
                 else:
