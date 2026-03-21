@@ -900,12 +900,12 @@ def main():
     cmd = args[0]
 
     if cmd == "trends":
-        geo = _parse_flag(args, "--geo", "US")
+        geo = _parse_flag(args, "--geo", "")
         if len(args) >= 2 and not args[1].startswith("--"):
             keyword = args[1]
             result = google_trends_interest(keyword, geo)
         else:
-            result = google_trends_daily(geo)
+            result = google_trends_daily(geo or "US")
 
     elif cmd == "rising" and len(args) >= 2:
         geo = _parse_flag(args, "--geo", "")
