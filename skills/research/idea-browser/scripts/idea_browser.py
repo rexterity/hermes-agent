@@ -21,6 +21,7 @@ All output is structured JSON. Zero external dependencies — Python stdlib only
 """
 
 import json
+import math
 import sys
 import time
 import urllib.error
@@ -623,7 +624,6 @@ def _score_reddit(keyword: str) -> dict:
         community_count = len(subreddits)
 
         # Subscriber scale score (log scale — 1M+ is top tier)
-        import math
         sub_score = min(math.log10(max(total_subs, 1)) / 7 * 50, 50)  # max 50 pts
 
         # Activity ratio score
@@ -674,7 +674,6 @@ def _score_tiktok(keyword: str) -> dict:
         total_views = sum(h.get("view_count", 0) for h in matching)
         total_videos = sum(h.get("video_count", 0) for h in matching)
 
-        import math
         view_score = min(math.log10(max(total_views, 1)) / 12 * 60, 60)  # max 60 pts
         video_score = min(math.log10(max(total_videos, 1)) / 8 * 25, 25)  # max 25 pts
         match_score = min(len(matching) * 5, 15)  # max 15 pts
@@ -706,7 +705,6 @@ def _score_polymarket(keyword: str) -> dict:
         total_volume = sum(e.get("volume", 0) for e in events)
         market_count = sum(len(e.get("markets", [])) for e in events)
 
-        import math
         # Volume score (log scale — $10M+ is strong signal)
         vol_score = min(math.log10(max(total_volume, 1)) / 8 * 70, 70)  # max 70 pts
 
