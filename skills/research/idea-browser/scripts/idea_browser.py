@@ -524,13 +524,13 @@ def polymarket_search(keyword: str) -> dict:
         markets = evt.get("markets", [])
         market_summaries = []
         for m in markets[:5]:
-            prices = m.get("outcomePrices", "[]")
+            prices = m.get("outcomePrices") or "[]"
             if isinstance(prices, str):
                 try:
                     prices = json.loads(prices)
                 except json.JSONDecodeError:
                     prices = []
-            outcomes = m.get("outcomes", "[]")
+            outcomes = m.get("outcomes") or "[]"
             if isinstance(outcomes, str):
                 try:
                     outcomes = json.loads(outcomes)
