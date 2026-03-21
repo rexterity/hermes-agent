@@ -49,6 +49,8 @@ def _get(url: str, headers: dict | None = None, timeout: int = 15) -> bytes:
         return json.dumps({"error": f"HTTP {e.code}: {e.reason}"}).encode()
     except urllib.error.URLError as e:
         return json.dumps({"error": f"Connection error: {e.reason}"}).encode()
+    except OSError as e:
+        return json.dumps({"error": f"Network error: {e}"}).encode()
 
 
 def _get_json(url: str, headers: dict | None = None, timeout: int = 15):
@@ -278,8 +280,8 @@ def tiktok_trending_hashtags(region: str = "US", period: int = 7, limit: int = 2
     if "error" in data:
         return {"platform": "tiktok", "type": "hashtags", "region": region, **data}
 
-    hashtag_list = data.get("data", {}).get("list", [])
-    pagination = data.get("data", {}).get("pagination", {})
+    hashtag_list = (data.get("data") or {}).get("list", [])
+    pagination = (data.get("data") or {}).get("pagination", {})
 
     hashtags = []
     for h in hashtag_list:
@@ -317,8 +319,8 @@ def tiktok_trending_sounds(region: str = "US", period: int = 7, limit: int = 20)
     if "error" in data:
         return {"platform": "tiktok", "type": "sounds", "region": region, **data}
 
-    sound_list = data.get("data", {}).get("list", [])
-    pagination = data.get("data", {}).get("pagination", {})
+    sound_list = (data.get("data") or {}).get("list", [])
+    pagination = (data.get("data") or {}).get("pagination", {})
 
     sounds = []
     for s in sound_list:
@@ -360,7 +362,7 @@ def reddit_search_subreddits(keyword: str, limit: int = 10) -> dict:
     if "error" in data:
         return {"platform": "reddit", "keyword": keyword, **data}
 
-    children = data.get("data", {}).get("children", [])
+    children = (data.get("data") or {}).get("children", [])
     subreddits = []
     for child in children:
         sr = child.get("data", {})
@@ -410,7 +412,7 @@ def reddit_pain_points(keyword: str, subreddit: str = "", limit: int = 25) -> di
         if "error" in data:
             continue
 
-        for child in data.get("data", {}).get("children", []):
+        for child in (data.get("data") or {}).get("children", []):
             post = child.get("data", {})
             all_posts.append({
                 "title": post.get("title", ""),
@@ -450,7 +452,7 @@ def reddit_growing_subreddits(limit: int = 20) -> dict:
     if "error" in data:
         return {"platform": "reddit", "type": "growing", **data}
 
-    children = data.get("data", {}).get("children", [])
+    children = (data.get("data") or {}).get("children", [])
     subreddits = []
     for child in children:
         sr = child.get("data", {})
