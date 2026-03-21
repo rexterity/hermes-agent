@@ -681,7 +681,7 @@ def _score_tiktok(keyword: str, *, prefetched: dict | None = None) -> dict:
         matching = []
         for h in hashtags.get("hashtags", []):
             name = h.get("name", "").lower().replace(" ", "")
-            if kw_lower in name or name in kw_lower:
+            if kw_lower in name or (name in kw_lower and len(name) > 3):
                 matching.append(h)
 
         if not matching:
