@@ -6,12 +6,13 @@ Queries Google Trends, TikTok, Reddit, and Polymarket, then computes a composite
 demand score (0-100).
 
 Usage:
-    python3 idea_browser.py trends "keyword"                  # Google Trends: daily trending searches
-    python3 idea_browser.py trends "keyword" --geo US         # Google Trends: trending for a region
+    python3 idea_browser.py trends "keyword"                  # Google Trends: interest over time
+    python3 idea_browser.py trends "keyword" --geo US         # Google Trends: interest over time for a region
     python3 idea_browser.py rising "keyword"                  # Google Trends: rising related queries
     python3 idea_browser.py tiktok [--region US] [--period 7] # TikTok: trending hashtags
     python3 idea_browser.py tiktok-sounds [--region US]       # TikTok: trending sounds
-    python3 idea_browser.py reddit "keyword"                  # Reddit: subreddit discovery + pain points
+    python3 idea_browser.py reddit "keyword"                  # Reddit: subreddit discovery
+    python3 idea_browser.py reddit-pain "keyword"              # Reddit: extract pain points / unmet needs
     python3 idea_browser.py reddit-growing [--limit 20]       # Reddit: fast-growing subreddits
     python3 idea_browser.py polymarket "keyword"              # Polymarket: prediction market signals
     python3 idea_browser.py score "keyword"                   # Demand Scorer: composite 0-100 score
