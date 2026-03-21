@@ -1521,6 +1521,24 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
     return {"logged_in": False}
 
 
+def get_authenticated_providers() -> List[str]:
+    """Return a list of provider IDs that are currently authenticated.
+
+    Checks each known provider's auth status and returns those that
+    report ``logged_in: True``.  Used by the dual-provider budget
+    manager to know which providers are available for hot-swapping.
+    """
+    authenticated: List[str] = []
+    for pid in PROVIDER_REGISTRY:
+        try:
+            status = get_auth_status(pid)
+            if status.get("logged_in"):
+                authenticated.append(pid)
+        except Exception:
+            continue
+    return authenticated
+
+
 def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     """Resolve API key and base URL for an API-key provider.
 

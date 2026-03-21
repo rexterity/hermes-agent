@@ -265,6 +265,39 @@ Write only the summary body. Do not include any preamble or prefix; the system w
             idx -= 1
         return idx
 
+    def generate_handoff_summary(
+        self,
+        messages: List[Dict[str, Any]],
+        from_provider: str = "",
+        to_provider: str = "",
+    ) -> Optional[str]:
+        """Generate a compressed handoff summary for a dual-provider context swap.
+
+        Summarizes the full conversation (minus system prompt) into a concise
+        handoff message that the new provider can use to continue the work.
+        Includes provider swap metadata so the receiving model understands the
+        transition.
+
+        Returns the summary string with a handoff prefix, or None on failure.
+        """
+        # Skip system message, summarize everything else
+        turns = [m for m in messages if m.get("role") != "system"]
+        if not turns:
+            return None
+
+        summary = self._generate_summary(turns)
+        if not summary:
+            return None
+
+        # Inject swap metadata into the summary
+        swap_note = ""
+        if from_provider and to_provider:
+            swap_note = (
+                f"\n\n[PROVIDER SWAP: Conversation handed off from {from_provider} "
+                f"to {to_provider}. Continue from where the previous provider left off.]"
+            )
+        return summary + swap_note
+
     def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None) -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.
 

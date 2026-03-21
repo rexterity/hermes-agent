@@ -66,6 +66,22 @@ model:
 #     model: google/gemini-2.5-flash
 
 # =============================================================================
+# Dual Provider — Concurrent Anthropic + Codex (optional)
+# =============================================================================
+# Run two providers simultaneously with dynamic context swapping.
+# When one provider's context window approaches the threshold, the system
+# hot-swaps to the other provider with a compressed handoff summary.
+# Both providers must be authenticated (hermes login for each).
+#
+# dual_provider:
+#   enabled: true
+#   swap_threshold: 0.85        # swap when context hits 85%
+#   carry_last_n_messages: 4    # verbatim messages to carry across swap
+#   providers:
+#     - anthropic
+#     - openai-codex
+
+# =============================================================================
 # Git Worktree Isolation
 # =============================================================================
 # When enabled, each CLI session creates an isolated git worktree so multiple

@@ -875,7 +875,33 @@ class AIAgent:
         self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
-        
+
+        # Dual-provider budget manager (initialised lazily when config enables it)
+        self._dual_provider_mgr = None  # type: ignore[assignment]
+        try:
+            from agent.dual_provider import load_dual_provider_config, DualProviderBudgetManager, DEFAULT_CONTEXT_LENGTHS
+            dp_cfg = load_dual_provider_config()
+            if dp_cfg["enabled"]:
+                self._dual_provider_mgr = DualProviderBudgetManager(
+                    provider_order=dp_cfg["providers"],
+                    swap_threshold=dp_cfg["swap_threshold"],
+                    carry_last_n_messages=dp_cfg["carry_last_n_messages"],
+                )
+                # Mark ALL authenticated providers (not just the active one)
+                # so check_and_swap can find valid swap targets.
+                from hermes_cli.auth import get_authenticated_providers
+                authenticated_pids = get_authenticated_providers()
+                for pid in dp_cfg["providers"]:
+                    if pid in authenticated_pids:
+                        pid_ctx_len = DEFAULT_CONTEXT_LENGTHS.get(pid, 200_000)
+                        self._dual_provider_mgr.mark_authenticated(pid, pid_ctx_len)
+                        self._dual_provider_mgr.update_context_length(pid, pid_ctx_len)
+                # Override active provider's context length with the probed value
+                ctx_len = self.context_compressor.context_length
+                self._dual_provider_mgr.update_context_length(self.provider, ctx_len)
+        except Exception:
+            self._dual_provider_mgr = None
+
         if not self.quiet_mode:
             if compression_enabled:
                 print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (compress at {int(compression_threshold*100)}% = {self.context_compressor.threshold_tokens:,})")
@@ -4057,6 +4083,192 @@ class AIAgent:
 
         return compressed, new_system_prompt
 
+    def _perform_dual_provider_swap(
+        self,
+        target_provider: str,
+        messages: list,
+        system_message: str,
+        task_id: str,
+    ) -> None:
+        """Hot-swap the active provider to *target_provider*.
+
+        1. Generate a handoff summary via ContextCompressor
+        2. Validate and switch provider credentials (fallible)
+        3. Only then replace messages in-place (non-fallible)
+        4. Reset the context compressor for the new provider's limits
+
+        The destructive mutation of the messages list is deferred until
+        after all fallible operations (credential lookup, client refresh)
+        succeed, so a failure mid-swap does not leave the agent in a
+        corrupted state.
+        """
+        from hermes_cli.auth import get_auth_status, PROVIDER_REGISTRY
+        from agent.dual_provider import DEFAULT_CONTEXT_LENGTHS, DEFAULT_MODELS
+
+        mgr = self._dual_provider_mgr
+        carry_n = mgr.carry_last_n_messages if mgr else 4
+        old_provider = self.provider
+
+        # 1. Generate handoff summary
+        handoff = self.context_compressor.generate_handoff_summary(
+            messages,
+            from_provider=old_provider,
+            to_provider=target_provider,
+        )
+
+        # 2. Build new message list (but don't apply yet)
+        last_n = messages[-carry_n:] if carry_n > 0 else []
+        # Sanitize carried messages BEFORE computing handoff role so that
+        # orphaned tool pairs are removed first (the first message may change).
+        last_n = self.context_compressor._sanitize_tool_pairs(last_n)
+        new_messages: list = []
+        if handoff:
+            handoff_text = f"[Handoff summary from previous provider]\n\n{handoff}"
+            if not last_n:
+                # No carried messages — summary is the only message.
+                # Must be "user" so Anthropic accepts it as the first message.
+                new_messages.append({"role": "user", "content": handoff_text})
+            else:
+                first_carried_role = last_n[0].get("role", "user")
+                if first_carried_role == "user":
+                    # Merging the handoff into the first carried message avoids
+                    # an "assistant" summary before a "user" message (which would
+                    # be the first message and violate Anthropic's requirement
+                    # that the first non-system message is "user").
+                    first_msg = last_n[0].copy()
+                    last_n[0] = first_msg
+                    original = first_msg.get("content", "")
+                    first_msg["content"] = f"{handoff_text}\n\n{original}"
+                else:
+                    # First carried message is assistant/tool — safe to prepend
+                    # a "user" summary before it.
+                    new_messages.append({"role": "user", "content": handoff_text})
+        new_messages.extend(last_n)
+
+        # 3. Switch provider credentials (fallible — do BEFORE mutating messages)
+        pconfig = PROVIDER_REGISTRY.get(target_provider)
+        if not pconfig:
+            raise RuntimeError(f"Cannot swap to {target_provider}: not in PROVIDER_REGISTRY")
+
+        if pconfig:
+            new_model = DEFAULT_MODELS.get(target_provider, self.model)
+            new_base_url = pconfig.inference_base_url or self.base_url
+
+            # Determine API mode
+            if target_provider == "openai-codex":
+                new_api_mode = "codex_responses"
+            elif target_provider == "anthropic":
+                new_api_mode = "anthropic_messages"
+            else:
+                new_api_mode = "chat_completions"
+
+            # Set provider/api_mode BEFORE credential refresh so the
+            # refresh methods' guard checks (e.g. self.api_mode !=
+            # "codex_responses") pass for the target provider.
+            saved_provider = self.provider
+            saved_api_mode = self.api_mode
+            saved_base_url = self.base_url
+            saved_api_key = self.api_key
+            self.provider = target_provider
+            self.api_mode = new_api_mode
+
+            # Refresh auth credentials for the target provider (fallible)
+            try:
+                auth_status = get_auth_status(target_provider)
+                if auth_status.get("logged_in"):
+                    if target_provider == "openai-codex":
+                        self._try_refresh_codex_client_credentials(force=True)
+                    elif target_provider == "anthropic":
+                        self._try_refresh_anthropic_client_credentials()
+
+                # Verify the target provider's client was actually built.
+                # Codex: the refresh sets self.api_key; if it's unchanged
+                # the refresh silently failed — try a direct credential resolve.
+                if target_provider == "openai-codex" and self.api_key == saved_api_key:
+                    from hermes_cli.auth import resolve_codex_runtime_credentials
+                    creds = resolve_codex_runtime_credentials(force_refresh=True)
+                    codex_key = creds.get("api_key", "")
+                    if not codex_key:
+                        raise RuntimeError("Cannot swap to openai-codex: no credentials available")
+                    self.api_key = codex_key.strip()
+                    codex_url = creds.get("base_url", "")
+                    if codex_url:
+                        self.base_url = codex_url.strip().rstrip("/")
+
+                # Anthropic: The refresh methods return False (without raising)
+                # when the prerequisite attributes (e.g. _anthropic_api_key)
+                # were never set — so we must check explicitly.
+                if target_provider == "anthropic" and self._anthropic_client is None:
+                    from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
+                    effective_key = resolve_anthropic_token() or ""
+                    if not effective_key:
+                        raise RuntimeError("Cannot swap to anthropic: no API key available")
+                    self._anthropic_api_key = effective_key
+                    self._anthropic_base_url = new_base_url
+                    from agent.anthropic_adapter import _is_oauth_token as _is_oat
+                    self._is_anthropic_oauth = _is_oat(effective_key)
+                    self._anthropic_client = build_anthropic_client(effective_key, new_base_url)
+            except Exception:
+                # Revert provider/api_mode on failure so the agent
+                # remains in a consistent state.
+                self.provider = saved_provider
+                self.api_mode = saved_api_mode
+                self.base_url = saved_base_url
+                self.api_key = saved_api_key
+                raise
+
+            # Commit remaining state changes
+            self.model = new_model
+            # Only set base_url if the credential refresh didn't already
+            # resolve a more specific URL (e.g. from HERMES_CODEX_BASE_URL).
+            # Compare against the saved pre-refresh value — if the refresh
+            # changed it, keep the refresh's value; otherwise use the static one.
+            if self.base_url != saved_base_url:
+                pass  # credential refresh already resolved a specific URL
+            else:
+                self.base_url = new_base_url
+
+            # Keep self.api_key in sync so sub-agent delegation and other
+            # consumers that read it get the correct provider key.
+            if target_provider == "anthropic" and hasattr(self, "_anthropic_api_key"):
+                self.api_key = self._anthropic_api_key
+
+            # Update prompt caching flag
+            is_claude = "claude" in self.model.lower()
+            is_native_anthropic = self.api_mode == "anthropic_messages"
+            self._use_prompt_caching = is_native_anthropic or (
+                "openrouter" in self.base_url.lower() and is_claude
+            )
+
+        # 4. Replace messages in-place ONLY after credentials are switched
+        # (Tool-pair sanitization was already applied to last_n above,
+        # before computing the handoff summary role.)
+        messages.clear()
+        messages.extend(new_messages)
+
+        # 5. Reset context compressor for new provider's limits
+        new_ctx_len = DEFAULT_CONTEXT_LENGTHS.get(target_provider, 200_000)
+        self.context_compressor.context_length = new_ctx_len
+        self.context_compressor.threshold_tokens = int(
+            new_ctx_len * self.context_compressor.threshold_percent
+        )
+        self.context_compressor.last_prompt_tokens = 0
+        self.context_compressor.last_completion_tokens = 0
+
+        # Invalidate cached system prompt so it's rebuilt on next iteration
+        self._invalidate_system_prompt()
+
+        # Record the swap
+        if mgr:
+            mgr.record_swap(old_provider)
+            mgr.update_context_length(target_provider, new_ctx_len)
+
+        self._vprint(
+            f"{self.log_prefix}🔄 Dual-provider swap: {old_provider} → {target_provider} "
+            f"(model: {self.model})",
+            force=True,
+        )
+
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute tool calls from the assistant message and append results to messages.
 
@@ -5452,6 +5664,19 @@ class AIAgent:
                         self.session_cache_write_tokens += canonical_usage.cache_write_tokens
                         self.session_reasoning_tokens += canonical_usage.reasoning_tokens
 
+                        # Record per-provider usage for dual-provider budget tracking
+                        if self._dual_provider_mgr is not None:
+                            self._dual_provider_mgr.record_usage(
+                                self.provider,
+                                input_tokens=canonical_usage.input_tokens,
+                                output_tokens=canonical_usage.output_tokens,
+                                cache_read_tokens=canonical_usage.cache_read_tokens,
+                                cache_write_tokens=canonical_usage.cache_write_tokens,
+                                reasoning_tokens=canonical_usage.reasoning_tokens,
+                                prompt_tokens=prompt_tokens,
+                                estimated_cost_usd=0.0,  # cost not tracked per-provider yet
+                            )
+
                         cost_result = estimate_usage_cost(
                             self.model,
                             canonical_usage,
@@ -6198,13 +6423,51 @@ class AIAgent:
                         + _compressor.last_completion_tokens
                         + _new_chars // 3  # conservative: JSON-heavy tool results ≈ 3 chars/token
                     )
-                    if self.compression_enabled and _compressor.should_compress(_estimated_next_prompt):
+                    _compression_fired = (
+                        self.compression_enabled
+                        and _compressor.should_compress(_estimated_next_prompt)
+                    )
+                    if _compression_fired:
                         messages, active_system_prompt = self._compress_context(
                             messages, system_message,
                             approx_tokens=self.context_compressor.last_prompt_tokens,
                             task_id=effective_task_id,
                         )
                     
+                    # ── Dual-provider swap check ──────────────────
+                    # After tool execution completes, check if the active
+                    # provider's context is approaching its limit and swap
+                    # to the standby provider if available.
+                    if self._dual_provider_mgr is not None:
+                        # If compression just fired, re-estimate tokens from
+                        # the (now shorter) messages so we don't use the stale
+                        # pre-compression value (which would trigger an
+                        # unnecessary swap + double-summary).
+                        _swap_prompt_estimate = (
+                            estimate_messages_tokens_rough(messages)
+                            if _compression_fired
+                            else _estimated_next_prompt
+                        )
+                        _swap_target = self._dual_provider_mgr.check_and_swap(
+                            self.provider, _swap_prompt_estimate,
+                        )
+                        if _swap_target is not None:
+                            try:
+                                self._perform_dual_provider_swap(
+                                    _swap_target, messages, system_message,
+                                    effective_task_id,
+                                )
+                                # Rebuild system prompt (same as _compress_context)
+                                # so the full identity/skills/memory layers are
+                                # preserved on the new provider.
+                                active_system_prompt = self._build_system_prompt(system_message)
+                                self._cached_system_prompt = active_system_prompt
+                            except Exception as _swap_err:
+                                logger.warning(
+                                    "Dual-provider swap to %s failed: %s",
+                                    _swap_target, _swap_err,
+                                )
+
                     # Save session log incrementally (so progress is visible even if interrupted)
                     self._session_messages = messages
                     self._save_session_log(messages)

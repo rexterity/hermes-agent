@@ -1285,6 +1285,21 @@ class HermesCLI:
             if context_length:
                 snapshot["context_percent"] = max(0, min(100, round((context_tokens / context_length) * 100)))
 
+        # Dual-provider status
+        snapshot["provider_usage"] = {}
+        snapshot["active_provider"] = None
+        dual_mgr = getattr(agent, "_dual_provider_mgr", None)
+        if dual_mgr is not None:
+            active_provider = getattr(agent, "provider", None)
+            snapshot["active_provider"] = active_provider
+            for pid, usage in dual_mgr.provider_usage.items():
+                snapshot["provider_usage"][pid] = {
+                    "total_tokens": usage["input_tokens"] + usage["output_tokens"],
+                    "context_tokens": usage["context_tokens"],
+                    "context_length": usage["context_length"],
+                    "is_active": (pid == active_provider),
+                }
+
         return snapshot
 
     def _build_status_bar_text(self, width: Optional[int] = None) -> str:
@@ -1364,6 +1379,22 @@ class HermesCLI:
                 ("class:status-bar-dim", " "),
                 (bar_style, percent_label),
             ]
+            # Dual-provider indicators
+            _PROVIDER_LABELS = {"anthropic": "A", "openai-codex": "C", "openrouter": "OR"}
+            _provider_usage = snapshot.get("provider_usage", {})
+            if _provider_usage:
+                for _pid in sorted(_provider_usage):
+                    _pu = _provider_usage[_pid]
+                    _label = _PROVIDER_LABELS.get(_pid, _pid[:3])
+                    _total_str = format_token_count_compact(_pu["total_tokens"])
+                    _indicator = "●" if _pu["is_active"] else "○"
+                    frags.append(("class:status-bar-dim", " │ "))
+                    _style = "class:status-bar-strong" if _pu["is_active"] else "class:status-bar-dim"
+                    if width >= 110:
+                        frags.append((_style, f"{_label}: {_total_str} {_indicator}"))
+                    else:
+                        frags.append((_style, f"{_label}:{_total_str}{_indicator}"))
+
             frags.extend([
                 ("class:status-bar-dim", " │ "),
                 ("class:status-bar-dim", duration_label),
