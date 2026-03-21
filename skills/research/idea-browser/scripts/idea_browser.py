@@ -142,6 +142,9 @@ def google_trends_interest(keyword: str, geo: str = "", timeframe: str = "today 
     except json.JSONDecodeError:
         return {"keyword": keyword, "geo": geo, "error": "Failed to parse explore response"}
 
+    if "error" in explore_data:
+        return {"keyword": keyword, "geo": geo, "error": explore_data["error"]}
+
     # Extract the interest-over-time widget token
     widgets = explore_data.get("widgets", [])
     iot_widget = None
@@ -170,6 +173,9 @@ def google_trends_interest(keyword: str, geo: str = "", timeframe: str = "today 
         ts_data = json.loads(ts_text)
     except json.JSONDecodeError:
         return {"keyword": keyword, "geo": geo, "error": "Failed to parse timeseries response"}
+
+    if "error" in ts_data:
+        return {"keyword": keyword, "geo": geo, "error": ts_data["error"]}
 
     timeline = ts_data.get("default", {}).get("timelineData", [])
     points = []
@@ -219,6 +225,9 @@ def google_trends_rising(keyword: str, geo: str = "") -> dict:
     except json.JSONDecodeError:
         return {"keyword": keyword, "error": "Failed to parse explore response"}
 
+    if "error" in explore_data:
+        return {"keyword": keyword, "error": explore_data["error"]}
+
     widgets = explore_data.get("widgets", [])
     rq_widget = None
     for w in widgets:
@@ -245,6 +254,9 @@ def google_trends_rising(keyword: str, geo: str = "") -> dict:
         rq_data = json.loads(rq_text)
     except json.JSONDecodeError:
         return {"keyword": keyword, "error": "Failed to parse related queries response"}
+
+    if "error" in rq_data:
+        return {"keyword": keyword, "error": rq_data["error"]}
 
     ranked = rq_data.get("default", {}).get("rankedList", [])
     top_queries = []
