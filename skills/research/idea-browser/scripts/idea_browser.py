@@ -56,11 +56,22 @@ def _get(url: str, headers: dict | None = None, timeout: int = 15) -> bytes:
 def _get_json(url: str, headers: dict | None = None, timeout: int = 15):
     """GET request, return parsed JSON."""
     raw = _get(url, headers, timeout)
-    return json.loads(raw.decode("utf-8", errors="replace"))
+    try:
+        return json.loads(raw.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return {"error": "Response is not valid JSON", "raw_snippet": raw[:200].decode("utf-8", errors="replace")}
 
 
 def _clamp(val: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, val))
+
+
+def _fmt_pct(val) -> str:
+    """Format a value as a percentage string, e.g. '65.0%'. Returns '?' on failure."""
+    try:
+        return f"{float(val) * 100:.1f}%"
+    except (ValueError, TypeError):
+        return "?"
 
 
 # ─── Google Trends Module ─────────────────────────────────────────────────────
@@ -516,7 +527,7 @@ def polymarket_search(keyword: str) -> dict:
                 "question": m.get("question", ""),
                 "prices": {
                     outcomes[i] if i < len(outcomes) else f"Outcome {i}":
-                    f"{float(prices[i]) * 100:.1f}%" if i < len(prices) else "?"
+                    _fmt_pct(prices[i]) if i < len(prices) else "?"
                     for i in range(max(len(prices), len(outcomes)))
                 },
                 "volume": m.get("volume", 0),
