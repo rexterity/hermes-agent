@@ -10,7 +10,6 @@ metadata:
     homepage: https://github.com/teng-lin/notebooklm-py
 prerequisites:
   commands: [notebooklm]
-  python_packages: [notebooklm-py]
 ---
 
 # NotebookLM CLI (notebooklm-py)
