@@ -207,12 +207,15 @@ def session_search(
         if role_filter and role_filter.strip():
             role_list = [r.strip() for r in role_filter.split(",") if r.strip()]
 
-        # FTS5 search -- get matches ranked by relevance
+        # FTS5 search -- dedupe_by_session uses a window function to return
+        # only the best-ranked message per session, preventing a single
+        # session with many matching messages from crowding out others.
         raw_results = db.search_messages(
             query=query,
             role_filter=role_list,
-            limit=50,  # Get more matches to find unique sessions
+            limit=50,
             offset=0,
+            dedupe_by_session=True,
         )
 
         if not raw_results:

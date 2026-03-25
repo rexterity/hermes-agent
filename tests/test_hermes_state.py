@@ -718,7 +718,13 @@ class TestSchemaInit:
     def test_schema_version(self, db):
         cursor = db._conn.execute("SELECT version FROM schema_version")
         version = cursor.fetchone()[0]
-        assert version == 5
+        assert version == 6
+
+    def test_chunk_id_column_exists(self, db):
+        """Verify the chunk_id column was created in the messages table."""
+        cursor = db._conn.execute("PRAGMA table_info(messages)")
+        columns = {row[1] for row in cursor.fetchall()}
+        assert "chunk_id" in columns
 
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
@@ -774,12 +780,12 @@ class TestSchemaInit:
         conn.commit()
         conn.close()
 
-        # Open with SessionDB — should migrate to v5
+        # Open with SessionDB — should migrate to v6
         migrated_db = SessionDB(db_path=db_path)
 
         # Verify migration
         cursor = migrated_db._conn.execute("SELECT version FROM schema_version")
-        assert cursor.fetchone()[0] == 5
+        assert cursor.fetchone()[0] == 6
 
         # Verify title column exists and is NULL for existing sessions
         session = migrated_db.get_session("existing")
@@ -1012,3 +1018,186 @@ class TestResolveSessionByNameOrId:
         db.set_session_title("s1", "my project")
         result = db.resolve_session_by_title("my project")
         assert result == "s1"
+
+
+# =========================================================================
+# chunk_id generation
+# =========================================================================
+
+class TestChunkId:
+    """Tests for chunk_id column — unique FTS document identifier."""
+
+    def test_chunk_id_format(self, db):
+        """chunk_id should be session_id + '_' + 0-based index."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="First message")
+        db.append_message("s1", role="assistant", content="Second message")
+        db.append_message("s1", role="user", content="Third message")
+
+        messages = db.get_messages("s1")
+        assert messages[0]["chunk_id"] == "s1_0"
+        assert messages[1]["chunk_id"] == "s1_1"
+        assert messages[2]["chunk_id"] == "s1_2"
+
+    def test_chunk_id_unique_across_sessions(self, db):
+        """chunk_ids from different sessions must not collide."""
+        db.create_session(session_id="s1", source="cli")
+        db.create_session(session_id="s2", source="cli")
+        db.append_message("s1", role="user", content="Hello from s1")
+        db.append_message("s2", role="user", content="Hello from s2")
+
+        msgs_s1 = db.get_messages("s1")
+        msgs_s2 = db.get_messages("s2")
+        assert msgs_s1[0]["chunk_id"] == "s1_0"
+        assert msgs_s2[0]["chunk_id"] == "s2_0"
+        assert msgs_s1[0]["chunk_id"] != msgs_s2[0]["chunk_id"]
+
+    def test_chunk_id_in_search_results(self, db):
+        """search_messages should include chunk_id in results."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="Deploy with Kubernetes")
+
+        results = db.search_messages("Kubernetes")
+        assert len(results) >= 1
+        assert results[0]["chunk_id"] == "s1_0"
+
+    def test_migration_backfills_chunk_id(self, tmp_path):
+        """Migrating from v5 should backfill chunk_id for existing messages."""
+        import sqlite3
+
+        db_path = tmp_path / "migrate_v5.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (5);
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                user_id TEXT,
+                model TEXT,
+                model_config TEXT,
+                system_prompt TEXT,
+                parent_session_id TEXT,
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                end_reason TEXT,
+                message_count INTEGER DEFAULT 0,
+                tool_call_count INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                cache_read_tokens INTEGER DEFAULT 0,
+                cache_write_tokens INTEGER DEFAULT 0,
+                reasoning_tokens INTEGER DEFAULT 0,
+                billing_provider TEXT,
+                billing_base_url TEXT,
+                billing_mode TEXT,
+                estimated_cost_usd REAL,
+                actual_cost_usd REAL,
+                cost_status TEXT,
+                cost_source TEXT,
+                pricing_version TEXT,
+                title TEXT
+            );
+
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_call_id TEXT,
+                tool_calls TEXT,
+                tool_name TEXT,
+                timestamp REAL NOT NULL,
+                token_count INTEGER,
+                finish_reason TEXT
+            );
+        """)
+        # Insert a session with 3 messages (no chunk_id column yet)
+        conn.execute(
+            "INSERT INTO sessions (id, source, started_at, message_count) "
+            "VALUES ('s1', 'cli', 1000.0, 3)"
+        )
+        for i in range(3):
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) "
+                "VALUES ('s1', 'user', ?, ?)",
+                (f"Message {i}", 1000.0 + i),
+            )
+        conn.commit()
+        conn.close()
+
+        # Open with SessionDB — should migrate to v6 and backfill
+        migrated_db = SessionDB(db_path=db_path)
+
+        cursor = migrated_db._conn.execute("SELECT version FROM schema_version")
+        assert cursor.fetchone()[0] == 6
+
+        cursor = migrated_db._conn.execute(
+            "SELECT chunk_id FROM messages WHERE session_id = 's1' ORDER BY id"
+        )
+        chunk_ids = [row[0] for row in cursor.fetchall()]
+        assert chunk_ids == ["s1_0", "s1_1", "s1_2"]
+
+        migrated_db.close()
+
+
+# =========================================================================
+# dedupe_by_session search
+# =========================================================================
+
+class TestDedupeBySession:
+    """Tests for search_messages(dedupe_by_session=True)."""
+
+    def test_dedupe_returns_one_result_per_session(self, db):
+        """With dedupe, each session appears at most once in results."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="Deploy docker containers")
+        db.append_message("s1", role="assistant", content="Use docker compose up")
+        db.append_message("s1", role="user", content="Docker networking issues")
+
+        db.create_session(session_id="s2", source="cli")
+        db.append_message("s2", role="user", content="Docker image build failed")
+
+        results = db.search_messages("docker", dedupe_by_session=True)
+        session_ids = [r["session_id"] for r in results]
+        # Each session should appear exactly once
+        assert len(session_ids) == len(set(session_ids))
+        assert set(session_ids) == {"s1", "s2"}
+
+    def test_dedupe_does_not_drop_sessions(self, db):
+        """A session with fewer matches should still appear when deduping."""
+        db.create_session(session_id="s1", source="cli")
+        # s1 has many matches for "python"
+        for i in range(10):
+            db.append_message("s1", role="user", content=f"Python tip #{i}")
+
+        db.create_session(session_id="s2", source="cli")
+        # s2 has just one match
+        db.append_message("s2", role="user", content="Python setup guide")
+
+        results = db.search_messages("python", dedupe_by_session=True, limit=50)
+        session_ids = {r["session_id"] for r in results}
+        assert "s1" in session_ids
+        assert "s2" in session_ids
+
+    def test_dedupe_false_returns_all_messages(self, db):
+        """Without dedupe, all matching messages are returned."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="Learn Rust basics")
+        db.append_message("s1", role="assistant", content="Rust is a systems language")
+        db.append_message("s1", role="user", content="Rust borrow checker help")
+
+        results = db.search_messages("Rust", dedupe_by_session=False)
+        # All three messages should be returned (no dedup)
+        assert len(results) == 3
+
+    def test_dedupe_removes_internal_columns(self, db):
+        """Internal columns (rn, bm25_score) must not leak into results."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="Search for Kubernetes")
+
+        results = db.search_messages("Kubernetes", dedupe_by_session=True)
+        assert len(results) >= 1
+        assert "rn" not in results[0]
+        assert "bm25_score" not in results[0]

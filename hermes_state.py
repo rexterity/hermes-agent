@@ -26,7 +26,7 @@ from typing import Dict, Any, List, Optional
 
 DEFAULT_DB_PATH = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")) / "state.db"
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_name TEXT,
     timestamp REAL NOT NULL,
     token_count INTEGER,
-    finish_reason TEXT
+    finish_reason TEXT,
+    chunk_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
@@ -185,6 +186,27 @@ class SessionDB:
                     except sqlite3.OperationalError:
                         pass
                 cursor.execute("UPDATE schema_version SET version = 5")
+            if current_version < 6:
+                # v6: add chunk_id column for unique FTS document IDs
+                try:
+                    cursor.execute("ALTER TABLE messages ADD COLUMN chunk_id TEXT")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+                try:
+                    cursor.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_messages_chunk_id "
+                        "ON messages(chunk_id)"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+                # Backfill chunk_id for existing messages
+                cursor.execute(
+                    "UPDATE messages SET chunk_id = session_id || '_' || "
+                    "(SELECT COUNT(*) FROM messages m2 "
+                    "WHERE m2.session_id = messages.session_id AND m2.id < messages.id) "
+                    "WHERE chunk_id IS NULL"
+                )
+                cursor.execute("UPDATE schema_version SET version = 6")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -591,10 +613,20 @@ class SessionDB:
         if role is 'tool' or tool_calls is present).
         """
         with self._lock:
+            # Compute chunk_id: session_id + "_" + 0-based index within session.
+            # message_count reflects how many messages exist before this insert.
+            mc_cursor = self._conn.execute(
+                "SELECT message_count FROM sessions WHERE id = ?", (session_id,)
+            )
+            mc_row = mc_cursor.fetchone()
+            chunk_index = mc_row["message_count"] if mc_row else 0
+            chunk_id = f"{session_id}_{chunk_index}"
+
             cursor = self._conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
-                   tool_calls, tool_name, timestamp, token_count, finish_reason)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   tool_calls, tool_name, timestamp, token_count, finish_reason,
+                   chunk_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -605,6 +637,7 @@ class SessionDB:
                     time.time(),
                     token_count,
                     finish_reason,
+                    chunk_id,
                 ),
             )
             msg_id = cursor.lastrowid
@@ -737,6 +770,7 @@ class SessionDB:
         role_filter: List[str] = None,
         limit: int = 20,
         offset: int = 0,
+        dedupe_by_session: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Full-text search across session messages using FTS5.
@@ -746,6 +780,11 @@ class SessionDB:
           - Phrases: '"exact phrase"'
           - Boolean: "docker OR kubernetes", "python NOT java"
           - Prefix: "deploy*"
+
+        When *dedupe_by_session* is True, only the highest-ranked message
+        per session is returned (best BM25 score wins).  This prevents a
+        single session with many matching messages from crowding out other
+        sessions in the result set.
 
         Returns matching messages with session metadata, content snippet,
         and surrounding context (1 message before and after the match).
@@ -774,27 +813,93 @@ class SessionDB:
             params.extend(role_filter)
 
         where_sql = " AND ".join(where_clauses)
-        params.extend([limit, offset])
 
-        sql = f"""
-            SELECT
-                m.id,
-                m.session_id,
-                m.role,
-                snippet(messages_fts, 0, '>>>', '<<<', '...', 40) AS snippet,
-                m.content,
-                m.timestamp,
-                m.tool_name,
-                s.source,
-                s.model,
-                s.started_at AS session_started
-            FROM messages_fts
-            JOIN messages m ON m.id = messages_fts.rowid
-            JOIN sessions s ON s.id = m.session_id
-            WHERE {where_sql}
-            ORDER BY rank
-            LIMIT ? OFFSET ?
-        """
+        if dedupe_by_session:
+            # Two-step approach: (1) collect all matching message IDs
+            # with their session and BM25 rank, (2) keep only the
+            # best-ranked ID per session, (3) re-query FTS for those
+            # IDs so snippet() runs in a direct FTS5 context (it
+            # errors inside subqueries).
+            #
+            # The inner query cannot alias the FTS table because
+            # SQLite FTS5 MATCH requires the real table name.
+            # Instead we join messages twice and use the messages
+            # table for the session grouping.
+            inner_where_clauses = ["messages_fts MATCH ?"]
+            inner_params: list = [query]
+
+            inner_source_ph = ",".join("?" for _ in source_filter)
+            inner_where_clauses.append(
+                f"si.source IN ({inner_source_ph})"
+            )
+            inner_params.extend(source_filter)
+
+            if role_filter:
+                inner_role_ph = ",".join("?" for _ in role_filter)
+                inner_where_clauses.append(
+                    f"mi.role IN ({inner_role_ph})"
+                )
+                inner_params.extend(role_filter)
+
+            inner_where = " AND ".join(inner_where_clauses)
+
+            sql = f"""
+                SELECT
+                    m.id,
+                    m.session_id,
+                    m.role,
+                    snippet(messages_fts, 0, '>>>', '<<<', '...', 40) AS snippet,
+                    m.content,
+                    m.timestamp,
+                    m.tool_name,
+                    m.chunk_id,
+                    s.source,
+                    s.model,
+                    s.started_at AS session_started
+                FROM messages_fts
+                JOIN messages m ON m.id = messages_fts.rowid
+                JOIN sessions s ON s.id = m.session_id
+                WHERE {where_sql}
+                  AND m.id IN (
+                    SELECT best.id FROM (
+                        SELECT mi.id, mi.session_id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY mi.session_id
+                                   ORDER BY messages_fts.rank
+                               ) AS rn
+                        FROM messages_fts
+                        JOIN messages mi ON mi.id = messages_fts.rowid
+                        JOIN sessions si ON si.id = mi.session_id
+                        WHERE {inner_where}
+                    ) best
+                    WHERE best.rn = 1
+                  )
+                ORDER BY rank
+                LIMIT ? OFFSET ?
+            """
+            params = list(params) + inner_params + [limit, offset]
+        else:
+            params.extend([limit, offset])
+            sql = f"""
+                SELECT
+                    m.id,
+                    m.session_id,
+                    m.role,
+                    snippet(messages_fts, 0, '>>>', '<<<', '...', 40) AS snippet,
+                    m.content,
+                    m.timestamp,
+                    m.tool_name,
+                    m.chunk_id,
+                    s.source,
+                    s.model,
+                    s.started_at AS session_started
+                FROM messages_fts
+                JOIN messages m ON m.id = messages_fts.rowid
+                JOIN sessions s ON s.id = m.session_id
+                WHERE {where_sql}
+                ORDER BY rank
+                LIMIT ? OFFSET ?
+            """
 
         with self._lock:
             try:
@@ -821,9 +926,11 @@ class SessionDB:
                 except Exception:
                     match["context"] = []
 
-        # Remove full content from result (snippet is enough, saves tokens)
+        # Remove internal columns from result
         for match in matches:
             match.pop("content", None)
+            match.pop("rn", None)
+            match.pop("bm25_score", None)
 
         return matches
 
