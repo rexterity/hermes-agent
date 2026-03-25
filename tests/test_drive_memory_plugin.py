@@ -544,11 +544,23 @@ class TestRegistration:
 
     def test_check_gws_respects_env(self, monkeypatch):
         from plugins.drive_memory import _check_gws
+        import shutil
 
+        # gws CLI found + env set → True
         monkeypatch.setenv("GWS_ENABLED", "1")
+        monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/gws")
         assert _check_gws() is True
 
+        # env unset → False even if CLI exists
         monkeypatch.delenv("GWS_ENABLED", raising=False)
+        assert _check_gws() is False
+
+    def test_check_gws_false_when_cli_missing(self, monkeypatch):
+        from plugins.drive_memory import _check_gws
+        import shutil
+
+        monkeypatch.setenv("GWS_ENABLED", "1")
+        monkeypatch.setattr(shutil, "which", lambda cmd: None)
         assert _check_gws() is False
 
 

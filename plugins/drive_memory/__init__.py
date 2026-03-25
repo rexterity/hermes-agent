@@ -168,8 +168,9 @@ def _handle_drive_media_store(args: dict, **kwargs: Any) -> str:
 # ---------------------------------------------------------------------------
 
 def _check_gws() -> bool:
-    """Return True when GWS_ENABLED is set."""
-    return bool(os.environ.get("GWS_ENABLED"))
+    """Return True when GWS_ENABLED is set and gws CLI is installed."""
+    from plugins.drive_memory import drive_state as _ds  # noqa: WPS433
+    return _ds._gws_available()
 
 
 # ---------------------------------------------------------------------------
