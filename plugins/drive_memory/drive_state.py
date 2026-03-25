@@ -315,9 +315,9 @@ def load_state(key: str) -> Dict[str, Any]:
 
     remote_path = f"{_REMOTE_BASE}/{key}.json"
 
-    # Download to a temp file, then read
-    os.makedirs(_LOCAL_CACHE_DIR, exist_ok=True)
-    tmp_file = os.path.join(_LOCAL_CACHE_DIR, f"{key}.json")
+    # Download to a unique temp dir to avoid races under concurrency
+    tmp_dir = tempfile.mkdtemp(prefix="hermes_drive_load_")
+    tmp_file = os.path.join(tmp_dir, f"{key}.json")
     try:
         result = _run_gws(["drive", "download", remote_path, tmp_file])
         if result.returncode != 0:
@@ -351,10 +351,13 @@ def load_state(key: str) -> Dict[str, Any]:
             "state": state,
         }
     finally:
-        # Clean up downloaded temp file
+        # Clean up temp files
         try:
-            if os.path.exists(tmp_file):
-                os.unlink(tmp_file)
+            os.unlink(tmp_file)
+        except OSError:
+            pass
+        try:
+            os.rmdir(tmp_dir)
         except OSError:
             pass
 
