@@ -76,6 +76,7 @@ from hermes_constants import OPENROUTER_BASE_URL, OPENROUTER_MODELS_URL
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
     MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
+    TOOL_SELECTION_POLICY,
 )
 from agent.model_metadata import (
     fetch_model_metadata, get_model_context_length,
@@ -86,6 +87,7 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt
+from tools.tool_usage_tracker import ToolUsageTracker
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
@@ -875,6 +877,9 @@ class AIAgent:
         self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
+
+        # Terminal-dominance tracker (REX-1109)
+        self._tool_usage_tracker = ToolUsageTracker()
         
         if not self.quiet_mode:
             if compression_enabled:
@@ -1862,6 +1867,8 @@ class AIAgent:
             tool_guidance.append(SESSION_SEARCH_GUIDANCE)
         if "skill_manage" in self.valid_tool_names:
             tool_guidance.append(SKILLS_GUIDANCE)
+        if "terminal" in self.valid_tool_names:
+            tool_guidance.append(TOOL_SELECTION_POLICY)
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
 
@@ -4167,6 +4174,9 @@ class AIAgent:
         for tool_call in tool_calls:
             function_name = tool_call.function.name
 
+            # Track tool usage for terminal-dominance detection (REX-1109)
+            self._tool_usage_tracker.record(function_name)
+
             # Reset nudge counters
             if function_name == "memory":
                 self._turns_since_memory = 0
@@ -4313,6 +4323,20 @@ class AIAgent:
             }
             messages.append(tool_msg)
 
+        # ── Terminal dominance nudge ─────────────────────────────────
+        terminal_nudge = self._tool_usage_tracker.get_terminal_nudge()
+        if terminal_nudge and messages and messages[-1].get("role") == "tool":
+            last_content = messages[-1]["content"]
+            try:
+                parsed = json.loads(last_content)
+                if isinstance(parsed, dict):
+                    parsed["_terminal_nudge"] = terminal_nudge
+                    messages[-1]["content"] = json.dumps(parsed, ensure_ascii=False)
+                else:
+                    messages[-1]["content"] = last_content + f"\n\n{terminal_nudge}"
+            except (json.JSONDecodeError, TypeError):
+                messages[-1]["content"] = last_content + f"\n\n{terminal_nudge}"
+
         # ── Budget pressure injection ────────────────────────────────────
         budget_warning = self._get_budget_warning(api_call_count)
         if budget_warning and messages and messages[-1].get("role") == "tool":
@@ -4352,6 +4376,9 @@ class AIAgent:
                 break
 
             function_name = tool_call.function.name
+
+            # Track tool usage for terminal-dominance detection (REX-1109)
+            self._tool_usage_tracker.record(function_name)
 
             # Reset nudge counters when the relevant tool is actually used
             if function_name == "memory":
@@ -4587,6 +4614,22 @@ class AIAgent:
 
             if self.tool_delay > 0 and i < len(assistant_message.tool_calls):
                 time.sleep(self.tool_delay)
+
+        # ── Terminal dominance nudge ─────────────────────────────────
+        # After all tool calls in this turn, check if terminal usage is
+        # too high and nudge the model to prefer purpose-built tools.
+        terminal_nudge = self._tool_usage_tracker.get_terminal_nudge()
+        if terminal_nudge and messages and messages[-1].get("role") == "tool":
+            last_content = messages[-1]["content"]
+            try:
+                parsed = json.loads(last_content)
+                if isinstance(parsed, dict):
+                    parsed["_terminal_nudge"] = terminal_nudge
+                    messages[-1]["content"] = json.dumps(parsed, ensure_ascii=False)
+                else:
+                    messages[-1]["content"] = last_content + f"\n\n{terminal_nudge}"
+            except (json.JSONDecodeError, TypeError):
+                messages[-1]["content"] = last_content + f"\n\n{terminal_nudge}"
 
         # ── Budget pressure injection ─────────────────────────────────
         # After all tool calls in this turn are processed, check if we're
