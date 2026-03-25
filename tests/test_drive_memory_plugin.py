@@ -369,7 +369,7 @@ class TestHooks:
 
         ds.on_pre_llm_call()
         assert len(load_calls) == 1
-        assert load_calls[0] == "session_state"
+        assert load_calls[0] == "_hermes_auto_session"
 
     def test_pre_llm_call_skips_when_cached(self, monkeypatch):
         from plugins.drive_memory import drive_state as ds
@@ -382,7 +382,7 @@ class TestHooks:
 
         monkeypatch.setattr(ds, "load_state", _fake_load)
         monkeypatch.setattr(ds, "_gws_available", lambda: True)
-        ds._cache.put("session_state", '{"warm": true}')
+        ds._cache.put("_hermes_auto_session", '{"warm": true}')
 
         ds.on_pre_llm_call()
         assert len(load_calls) == 0  # cache was warm, no load
@@ -424,7 +424,7 @@ class TestHooks:
 
         assert len(save_calls) == 1
         key, payload_json = save_calls[0]
-        assert key == "session_state"
+        assert key == "_hermes_auto_session"
         payload = json.loads(payload_json)
         assert payload["last_tool"] == "test_tool"
 
@@ -447,6 +447,26 @@ class TestHooks:
         ds.on_post_tool_call(tool_name="tool2", result="ok")
 
         assert len(save_calls) == 0  # debounced
+
+    def test_post_tool_call_skips_drive_tools(self, monkeypatch):
+        """Auto-save must not fire when the triggering tool is drive_state_save/load."""
+        from plugins.drive_memory import drive_state as ds
+
+        save_calls: List[tuple] = []
+
+        def _fake_save(key, payload):
+            save_calls.append((key, payload))
+            return {"success": True}
+
+        monkeypatch.setattr(ds, "save_state", _fake_save)
+        monkeypatch.setattr(ds, "_gws_available", lambda: True)
+        ds._last_auto_save_ts = 0.0
+
+        ds.on_post_tool_call(tool_name="drive_state_save", result="ok")
+        assert len(save_calls) == 0  # skipped for drive_state_save
+
+        ds.on_post_tool_call(tool_name="drive_state_load", result="ok")
+        assert len(save_calls) == 0  # skipped for drive_state_load
 
     def test_post_tool_call_no_crash_on_error(self, monkeypatch):
         from plugins.drive_memory import drive_state as ds

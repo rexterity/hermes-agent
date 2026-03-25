@@ -44,7 +44,7 @@ DRIVE_STATE_SAVE_SCHEMA = {
                 "type": "string",
                 "description": (
                     "Logical name for the state (alphanumeric, hyphens, "
-                    "underscores, dots; max 200 chars).  Example: 'session_state'"
+                    "underscores, dots; max 200 chars).  Example: 'my_app_state'"
                 ),
             },
             "state": {

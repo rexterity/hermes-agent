@@ -62,7 +62,7 @@ CACHE_TTL_S = float(os.environ.get("DRIVE_MEMORY_CACHE_TTL", "60"))
 AUTO_SAVE_DEBOUNCE_S = float(os.environ.get("DRIVE_MEMORY_DEBOUNCE", "30"))
 
 # Path component whitelist (letters, digits, hyphens, underscores, dots)
-_SAFE_KEY_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+_SAFE_KEY_RE = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9._-]*$")
 
 
 # ---------------------------------------------------------------------------
@@ -100,8 +100,9 @@ _cache = _StateCache()
 # Timestamp of last auto-save (monotonic clock) — used for debouncing
 _last_auto_save_ts: float = 0.0
 
-# Default state key used by hooks for the "current session" state
-_DEFAULT_STATE_KEY = "session_state"
+# Default state key used by hooks for the "current session" state.
+# Prefixed with underscore to avoid collision with user-chosen keys.
+_DEFAULT_STATE_KEY = "_hermes_auto_session"
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +428,11 @@ def on_post_tool_call(**kwargs: Any) -> None:
             return  # too soon since last save
 
         tool_name = kwargs.get("tool_name", "")
+
+        # Skip auto-save when the user just saved state explicitly
+        if tool_name in ("drive_state_save", "drive_state_load"):
+            return
+
         result_str = kwargs.get("result", "")
 
         # Build a minimal state snapshot from the tool call
