@@ -218,6 +218,17 @@ class SessionDB:
         except sqlite3.OperationalError:
             pass  # Index already exists
 
+        # chunk_id index — created after migrations so the column is
+        # guaranteed to exist (fresh DBs have it in SCHEMA_SQL, old DBs
+        # get it from the v6 migration above).
+        try:
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_chunk_id "
+                "ON messages(chunk_id)"
+            )
+        except sqlite3.OperationalError:
+            pass  # Index already exists
+
         # FTS5 setup (separate because CREATE VIRTUAL TABLE can't be in executescript with IF NOT EXISTS reliably)
         try:
             cursor.execute("SELECT * FROM messages_fts LIMIT 0")
@@ -904,9 +915,12 @@ class SessionDB:
         with self._lock:
             try:
                 cursor = self._conn.execute(sql, params)
-            except sqlite3.OperationalError:
-                # FTS5 query syntax error despite sanitization — return empty
-                return []
+            except sqlite3.OperationalError as exc:
+                # Only swallow FTS5 query-syntax errors; re-raise others
+                msg = str(exc).lower()
+                if "fts5" in msg or "match" in msg or "syntax" in msg:
+                    return []
+                raise
             matches = [dict(row) for row in cursor.fetchall()]
 
             # Add surrounding context (1 message before + after each match)
