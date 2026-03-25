@@ -92,19 +92,19 @@ class TestValidation:
     def test_key_rejects_empty(self):
         from plugins.drive_memory.drive_state import _validate_key
 
-        with pytest.raises(AssertionError, match="must not be empty"):
+        with pytest.raises(ValueError, match="must not be empty"):
             _validate_key("")
 
     def test_key_rejects_traversal(self):
         from plugins.drive_memory.drive_state import _validate_key
 
-        with pytest.raises(AssertionError, match="must not contain"):
+        with pytest.raises(ValueError, match="must not contain"):
             _validate_key("../etc/passwd")
 
     def test_key_rejects_slash(self):
         from plugins.drive_memory.drive_state import _validate_key
 
-        with pytest.raises(AssertionError, match="must not contain"):
+        with pytest.raises(ValueError, match="must not contain"):
             _validate_key("foo/bar")
 
     def test_key_rejects_special_chars(self):
@@ -116,7 +116,7 @@ class TestValidation:
     def test_key_rejects_too_long(self):
         from plugins.drive_memory.drive_state import _validate_key
 
-        with pytest.raises(AssertionError, match="exceeds"):
+        with pytest.raises(ValueError, match="exceeds"):
             _validate_key("a" * 201)
 
     def test_payload_rejects_invalid_json(self):
@@ -132,19 +132,19 @@ class TestValidation:
         )
 
         big = json.dumps({"x": "a" * (MAX_STATE_SIZE_BYTES + 1)})
-        with pytest.raises(AssertionError, match="too large"):
+        with pytest.raises(ValueError, match="too large"):
             _validate_state_payload(big)
 
     def test_validate_local_path_rejects_missing(self, tmp_path):
         from plugins.drive_memory.drive_state import _validate_local_path
 
-        with pytest.raises(AssertionError, match="does not exist"):
+        with pytest.raises(ValueError, match="does not exist"):
             _validate_local_path(str(tmp_path / "nope.txt"))
 
     def test_validate_local_path_rejects_directory(self, tmp_path):
         from plugins.drive_memory.drive_state import _validate_local_path
 
-        with pytest.raises(AssertionError, match="not a regular file"):
+        with pytest.raises(ValueError, match="not a regular file"):
             _validate_local_path(str(tmp_path))
 
     def test_validate_local_path_rejects_oversized(self, tmp_path):
@@ -155,7 +155,7 @@ class TestValidation:
 
         big = tmp_path / "huge.bin"
         big.write_bytes(b"\x00" * (MAX_MEDIA_SIZE_BYTES + 1))
-        with pytest.raises(AssertionError, match="too large"):
+        with pytest.raises(ValueError, match="too large"):
             _validate_local_path(str(big))
 
 
@@ -243,7 +243,7 @@ class TestSaveState:
     def test_save_rejects_bad_key(self, _gws_ok):
         from plugins.drive_memory.drive_state import save_state
 
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             save_state("../hack", json.dumps({"x": 1}))
 
     def test_save_rejects_bad_payload(self, _gws_ok):
@@ -306,7 +306,7 @@ class TestLoadState:
     def test_load_rejects_bad_key(self):
         from plugins.drive_memory.drive_state import load_state
 
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             load_state("../../etc/passwd")
 
 
@@ -336,13 +336,13 @@ class TestStoreMedia:
     def test_store_rejects_missing_file(self, _gws_ok, tmp_path):
         from plugins.drive_memory.drive_state import store_media
 
-        with pytest.raises(AssertionError, match="does not exist"):
+        with pytest.raises(ValueError, match="does not exist"):
             store_media(str(tmp_path / "nope"), "nope.txt")
 
     def test_store_rejects_bad_remote_name(self, _gws_ok, sample_file):
         from plugins.drive_memory.drive_state import store_media
 
-        with pytest.raises(AssertionError, match="must not contain"):
+        with pytest.raises(ValueError, match="must not contain"):
             store_media(str(sample_file), "../evil.txt")
 
 
@@ -477,7 +477,7 @@ class TestToolHandlers:
     def test_handle_save_missing_key(self):
         from plugins.drive_memory import _handle_drive_state_save
 
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             _handle_drive_state_save({"state": {"a": 1}})
 
     def test_handle_load_from_cache(self, _gws_ok):

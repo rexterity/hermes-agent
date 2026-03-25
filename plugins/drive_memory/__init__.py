@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from hermes_cli.plugins import PluginContext
@@ -109,47 +109,55 @@ DRIVE_MEDIA_STORE_SCHEMA = {
 # Tool handlers — thin wrappers that delegate to drive_state module
 # ---------------------------------------------------------------------------
 
-def _handle_drive_state_save(args: dict) -> str:
+def _handle_drive_state_save(args: dict, **kwargs: Any) -> str:
     """Handler for the drive_state_save tool."""
     from plugins.drive_memory import drive_state as _ds  # noqa: WPS433
 
-    assert isinstance(args, dict), "args must be a dict"
+    if not isinstance(args, dict):
+        raise ValueError("args must be a dict")
 
     key = args.get("key", "")
     state_obj = args.get("state")
 
-    assert key, "key is required"
-    assert state_obj is not None, "state is required"
+    if not key:
+        raise ValueError("key is required")
+    if state_obj is None:
+        raise ValueError("state is required")
 
     state_json = json.dumps(state_obj, ensure_ascii=False)
     result = _ds.save_state(key, state_json)
     return json.dumps(result)
 
 
-def _handle_drive_state_load(args: dict) -> str:
+def _handle_drive_state_load(args: dict, **kwargs: Any) -> str:
     """Handler for the drive_state_load tool."""
     from plugins.drive_memory import drive_state as _ds  # noqa: WPS433
 
-    assert isinstance(args, dict), "args must be a dict"
+    if not isinstance(args, dict):
+        raise ValueError("args must be a dict")
 
     key = args.get("key", "")
-    assert key, "key is required"
+    if not key:
+        raise ValueError("key is required")
 
     result = _ds.load_state(key)
     return json.dumps(result)
 
 
-def _handle_drive_media_store(args: dict) -> str:
+def _handle_drive_media_store(args: dict, **kwargs: Any) -> str:
     """Handler for the drive_media_store tool."""
     from plugins.drive_memory import drive_state as _ds  # noqa: WPS433
 
-    assert isinstance(args, dict), "args must be a dict"
+    if not isinstance(args, dict):
+        raise ValueError("args must be a dict")
 
     local_path = args.get("local_path", "")
     remote_name = args.get("remote_name", "")
 
-    assert local_path, "local_path is required"
-    assert remote_name, "remote_name is required"
+    if not local_path:
+        raise ValueError("local_path is required")
+    if not remote_name:
+        raise ValueError("remote_name is required")
 
     result = _ds.store_media(local_path, remote_name)
     return json.dumps(result)

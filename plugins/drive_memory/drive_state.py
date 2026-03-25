@@ -113,16 +113,22 @@ def _validate_key(key: str) -> str:
 
     Raises ValueError on invalid input.  Returns the cleaned key.
     """
-    assert isinstance(key, str), "key must be a string"
+    if not isinstance(key, str):
+        raise ValueError("key must be a string")
     key = key.strip()
-    assert len(key) > 0, "key must not be empty"
-    assert len(key) <= MAX_KEY_LENGTH, (
-        f"key exceeds {MAX_KEY_LENGTH} characters"
-    )
+    if len(key) == 0:
+        raise ValueError("key must not be empty")
+    if len(key) > MAX_KEY_LENGTH:
+        raise ValueError(
+            f"key exceeds {MAX_KEY_LENGTH} characters"
+        )
     # Reject path traversal attempts
-    assert ".." not in key, "key must not contain '..'"
-    assert "/" not in key, "key must not contain '/'"
-    assert "\\" not in key, "key must not contain '\\'"
+    if ".." in key:
+        raise ValueError("key must not contain '..'")
+    if "/" in key:
+        raise ValueError("key must not contain '/'")
+    if "\\" in key:
+        raise ValueError("key must not contain '\\'")
     if not _SAFE_KEY_RE.match(key):
         raise ValueError(
             f"key contains disallowed characters: {key!r}  "
@@ -133,12 +139,14 @@ def _validate_key(key: str) -> str:
 
 def _validate_state_payload(payload: str) -> None:
     """Ensure the state payload is valid JSON within size limits."""
-    assert isinstance(payload, str), "payload must be a string"
+    if not isinstance(payload, str):
+        raise ValueError("payload must be a string")
     size = len(payload.encode("utf-8"))
-    assert size <= MAX_STATE_SIZE_BYTES, (
-        f"state payload too large: {size} bytes "
-        f"(limit {MAX_STATE_SIZE_BYTES})"
-    )
+    if size > MAX_STATE_SIZE_BYTES:
+        raise ValueError(
+            f"state payload too large: {size} bytes "
+            f"(limit {MAX_STATE_SIZE_BYTES})"
+        )
     # Must be valid JSON
     json.loads(payload)
 
@@ -148,14 +156,18 @@ def _validate_local_path(path_str: str) -> Path:
 
     Prevents traversal outside of allowed directories.
     """
-    assert isinstance(path_str, str), "path must be a string"
+    if not isinstance(path_str, str):
+        raise ValueError("path must be a string")
     path = Path(path_str).resolve()
-    assert path.exists(), f"file does not exist: {path}"
-    assert path.is_file(), f"not a regular file: {path}"
+    if not path.exists():
+        raise ValueError(f"file does not exist: {path}")
+    if not path.is_file():
+        raise ValueError(f"not a regular file: {path}")
     size = path.stat().st_size
-    assert size <= MAX_MEDIA_SIZE_BYTES, (
-        f"file too large: {size} bytes (limit {MAX_MEDIA_SIZE_BYTES})"
-    )
+    if size > MAX_MEDIA_SIZE_BYTES:
+        raise ValueError(
+            f"file too large: {size} bytes (limit {MAX_MEDIA_SIZE_BYTES})"
+        )
     return path
 
 
