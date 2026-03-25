@@ -1,0 +1,16 @@
+name: drive-memory
+version: 0.2.0
+description: >-
+  Google Drive state persistence — save/load operational state and media
+  to Google Drive via the gws CLI.  Hooks auto-persist state after tool
+  calls and pre-load before LLM calls (with TTL caching).
+author: rexterity
+requires_env:
+  - GWS_ENABLED
+provides_tools:
+  - drive_state_save
+  - drive_state_load
+  - drive_media_store
+provides_hooks:
+  - pre_llm_call
+  - post_tool_call
