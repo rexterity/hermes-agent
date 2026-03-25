@@ -111,7 +111,7 @@ DRIVE_MEDIA_STORE_SCHEMA = {
 
 def _handle_drive_state_save(args: dict, **kwargs: Any) -> str:
     """Handler for the drive_state_save tool."""
-    from plugins.drive_memory import drive_state as _ds  # noqa: WPS433
+    from . import drive_state as _ds  # noqa: WPS433
 
     if not isinstance(args, dict):
         raise ValueError("args must be a dict")
@@ -131,7 +131,7 @@ def _handle_drive_state_save(args: dict, **kwargs: Any) -> str:
 
 def _handle_drive_state_load(args: dict, **kwargs: Any) -> str:
     """Handler for the drive_state_load tool."""
-    from plugins.drive_memory import drive_state as _ds  # noqa: WPS433
+    from . import drive_state as _ds  # noqa: WPS433
 
     if not isinstance(args, dict):
         raise ValueError("args must be a dict")
@@ -146,7 +146,7 @@ def _handle_drive_state_load(args: dict, **kwargs: Any) -> str:
 
 def _handle_drive_media_store(args: dict, **kwargs: Any) -> str:
     """Handler for the drive_media_store tool."""
-    from plugins.drive_memory import drive_state as _ds  # noqa: WPS433
+    from . import drive_state as _ds  # noqa: WPS433
 
     if not isinstance(args, dict):
         raise ValueError("args must be a dict")
@@ -169,7 +169,7 @@ def _handle_drive_media_store(args: dict, **kwargs: Any) -> str:
 
 def _check_gws() -> bool:
     """Return True when GWS_ENABLED is set and gws CLI is installed."""
-    from plugins.drive_memory import drive_state as _ds  # noqa: WPS433
+    from . import drive_state as _ds  # noqa: WPS433
     return _ds._gws_available()
 
 
@@ -179,7 +179,7 @@ def _check_gws() -> bool:
 
 def register(ctx: "PluginContext") -> None:
     """Register drive-memory tools and hooks with the Hermes plugin system."""
-    from plugins.drive_memory import drive_state as _ds  # noqa: WPS433
+    from . import drive_state as _ds  # noqa: WPS433
 
     assert ctx is not None, "PluginContext must not be None"
 
