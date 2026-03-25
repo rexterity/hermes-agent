@@ -154,6 +154,28 @@ SKILLS_GUIDANCE = (
     "Skills that aren't maintained become liabilities."
 )
 
+# ── Tool selection policy ────────────────────────────────────────────
+# Injected into the system prompt when terminal tools are loaded to steer
+# the model toward purpose-built tools and keep terminal usage under 30%.
+TOOL_SELECTION_POLICY = (
+    "# Tool selection policy\n"
+    "Prefer purpose-built tools over terminal commands. Terminal should be "
+    "LESS THAN 30% of your total tool calls.\n\n"
+    "| Instead of (terminal)            | Use this tool      |\n"
+    "|----------------------------------|--------------------|\n"
+    "| grep / rg / find / ls            | search_files       |\n"
+    "| cat / head / tail / less         | read_file          |\n"
+    "| sed / awk / perl -pi             | patch              |\n"
+    "| echo … > file / cat <<EOF        | write_file         |\n\n"
+    "When you need 3+ sequential terminal calls with processing logic "
+    "between them, use execute_code instead — it runs a Python script "
+    "that can call tools programmatically, reducing round-trips and "
+    "keeping terminal usage low.\n\n"
+    "Reserve terminal for: builds, installs, git, running servers/scripts, "
+    "network requests, package managers, and anything that genuinely needs "
+    "a shell."
+)
+
 PLATFORM_HINTS = {
     "whatsapp": (
         "You are on a text messaging communication platform, WhatsApp. "
