@@ -287,6 +287,9 @@ def save_state(key: str, state_json: str) -> Dict[str, Any]:
         # Clean up temp files
         try:
             os.unlink(tmp_file)
+        except OSError:
+            pass
+        try:
             os.rmdir(tmp_dir)
         except OSError:
             pass
