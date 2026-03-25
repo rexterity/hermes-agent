@@ -39,20 +39,16 @@ class TestRecordAndCounters:
         assert tracker.consecutive_terminal == 0
 
     def test_record_rejects_empty_string(self):
+        import pytest
         tracker = ToolUsageTracker()
-        try:
+        with pytest.raises(AssertionError):
             tracker.record("")
-            assert False, "Expected AssertionError"
-        except AssertionError:
-            pass
 
     def test_record_rejects_non_string(self):
+        import pytest
         tracker = ToolUsageTracker()
-        try:
+        with pytest.raises(AssertionError):
             tracker.record(42)
-            assert False, "Expected AssertionError"
-        except AssertionError:
-            pass
 
 
 class TestTerminalPercent:
