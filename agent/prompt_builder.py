@@ -162,7 +162,7 @@ TOOL_SELECTION_POLICY = (
     "Prefer purpose-built tools over terminal commands. Terminal should be "
     "LESS THAN 30% of your total tool calls.\n\n"
     "| Instead of (terminal)            | Use this tool      |\n"
-    "|----------------------------------|--------------------||\n"
+    "|----------------------------------|--------------------|\n"
     "| grep / rg / find / ls            | search_files       |\n"
     "| cat / head / tail / less         | read_file          |\n"
     "| sed / awk / perl -pi             | patch              |\n"

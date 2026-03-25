@@ -1867,10 +1867,10 @@ class AIAgent:
             tool_guidance.append(SESSION_SEARCH_GUIDANCE)
         if "skill_manage" in self.valid_tool_names:
             tool_guidance.append(SKILLS_GUIDANCE)
-        if "terminal" in self.valid_tool_names:
-            tool_guidance.append(TOOL_SELECTION_POLICY)
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
+        if "terminal" in self.valid_tool_names:
+            prompt_parts.append(TOOL_SELECTION_POLICY)
 
         # Honcho CLI awareness: tell Hermes about its own management commands
         # so it can refer the user to them rather than reinventing answers.
